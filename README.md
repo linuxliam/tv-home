@@ -2,6 +2,32 @@
 
 Android TV launcher with a PlayStation-inspired Cross Media Bar, live TV guide, Multiview, and IPTV playback.
 
+## Screenshots
+
+### Home
+
+![Home — greeting, quote, weather, and XMB categories](docs/home.png)
+
+### Favorites
+
+![Favorites column with white streaming icons](docs/favorites.png)
+
+### Live
+
+![Live column — Watch now and TV Guide](docs/live.png)
+
+### TV Guide
+
+![Electronic program guide with picture-in-picture](docs/guide.png)
+
+### Multiview
+
+![Multiview windows — apps, calendar, and weather](docs/multiview.png)
+
+### Player
+
+![Live player](docs/player.png)
+
 ## Build the APK
 
 Requires JDK 17+ and Android SDK platform 34 / build-tools 34.0.0.
