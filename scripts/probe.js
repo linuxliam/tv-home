@@ -1,0 +1,12 @@
+const fs = require('fs');
+const path = require('path');
+const { AndroidRemote } = require('androidtv-remote');
+const cert = JSON.parse(fs.readFileSync(path.join(__dirname, '..', '.pairing', 'cert.json'), 'utf8'));
+const r = new AndroidRemote(process.argv[2] || '10.120.0.107', { pairing_port: 6467, remote_port: 6466, name: 'homebridge-hisense', cert });
+r.on('powered', (p) => console.log('STATE powered', p));
+r.on('volume', (v) => console.log('STATE volume', JSON.stringify(v)));
+r.on('current_app', (a) => console.log('STATE app', a));
+r.on('ready', () => console.log('STATE ready'));
+r.on('error', (e) => console.log('ERR', e));
+r.start();
+setTimeout(() => process.exit(0), 6000);

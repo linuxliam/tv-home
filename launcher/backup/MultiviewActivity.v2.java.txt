@@ -1,0 +1,402 @@
+package com.liam.homescreen;
+
+import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.Context;
+import android.content.DialogInterface;
+import android.content.SharedPreferences;
+import android.graphics.Typeface;
+import android.media.tv.TvContract;
+import android.media.tv.TvInputInfo;
+import android.media.tv.TvInputManager;
+import android.media.tv.TvView;
+import android.os.Bundle;
+import android.os.SystemClock;
+import android.util.DisplayMetrics;
+import android.util.Log;
+import android.view.Gravity;
+import android.view.View;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
+import android.view.ViewGroup;
+import android.view.WindowManager;
+import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
+
+/**
+ * 2x2 grid of live inputs. OK once: hear that quadrant. OK twice (or hold OK): choose its input.
+ * Choices are remembered. Back leaves.
+ */
+public class MultiviewActivity extends Activity {
+    private static final String TAG = "Multiview";
+    private static final int CELLS = 4;
+    // The one input known to carry video (the Apple TV). Every other quadrant shows text for now.
+    static final String APPLE_TV_SUFFIX = "/HW3";
+    private static final long DOUBLE_CLICK_MS = 450;
+    // Web quadrants: the website versions of services, since apps can't share this TV's screen.
+    private static final String WEB = "web:";
+    private static final String[][] SITES = {
+            {"YouTube", "https://www.youtube.com/tv"},
+            {"Twitch", "https://www.twitch.tv"},
+    };
+    private static final String TV_UA = "Mozilla/5.0 (SMART-TV; LINUX; Tizen 6.0) AppleWebKit/537.36 "
+            + "(KHTML, like Gecko) 76.0.3809.146/6.0 TV Safari/537.36";
+
+    private final TvView[] views = new TvView[CELLS];
+    private final TextView[] labels = new TextView[CELLS];
+    private final TextView[] panels = new TextView[CELLS];
+    private final FrameLayout[] holders = new FrameLayout[CELLS];
+    private final LinearLayout[] cells = new LinearLayout[CELLS];
+    private final WebView[] webs = new WebView[CELLS];
+    private int webActive = -1;
+    private int cellW, cellH;
+    private TvInputManager tim;
+    private final String[] ids = new String[CELLS];
+    private final List<TvInputInfo> inputs = new ArrayList<>();
+    private SharedPreferences prefs;
+    private int listening = -1;
+    private int lastClickCell = -1;
+    private long lastClickAt;
+
+    @Override
+    protected void onCreate(Bundle state) {
+        super.onCreate(state);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        prefs = getSharedPreferences("home", MODE_PRIVATE);
+        DisplayMetrics dm = getResources().getDisplayMetrics();
+        final float d = dm.density;
+
+        tim = (TvInputManager) getSystemService(Context.TV_INPUT_SERVICE);
+        for (TvInputInfo info : tim.getTvInputList()) {
+            // Physical inputs only. The AirPlay input blanked the TV when shown in a quadrant.
+            if (!info.isPassthroughInput()) continue;
+            if (tim.getInputState(info.getId()) == TvInputManager.INPUT_STATE_DISCONNECTED) continue;
+            inputs.add(info);
+        }
+        final Context ctx = this;
+        Collections.sort(inputs, new Comparator<TvInputInfo>() {
+            @Override
+            public int compare(TvInputInfo a, TvInputInfo b) {
+                return name(ctx, a).compareToIgnoreCase(name(ctx, b));
+            }
+        });
+
+        LinearLayout grid = new LinearLayout(this);
+        grid.setOrientation(LinearLayout.VERTICAL);
+        grid.setGravity(Gravity.CENTER);
+        grid.setBackgroundColor(0xFF050508);
+
+        cellW = Math.round(dm.widthPixels * 0.42f);
+        cellH = Math.round(cellW * 9f / 16f);
+        LinearLayout row = null;
+        for (int i = 0; i < CELLS; i++) {
+            if (i % 2 == 0) {
+                row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                row.setGravity(Gravity.CENTER);
+                grid.addView(row, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            }
+            final int idx = i;
+            // Saved choice, else the i-th connected input, else empty.
+            ids[i] = prefs.contains("mvt" + i) ? emptyToNull(prefs.getString("mvt" + i, "")) : defaultFor(i);
+            if (ids[i] != null && !known(ids[i])) ids[i] = null; // e.g. a saved AirPlay choice
+
+            LinearLayout cell = new LinearLayout(this);
+            cell.setOrientation(LinearLayout.VERTICAL);
+            cell.setGravity(Gravity.CENTER_HORIZONTAL);
+            cell.setFocusable(true);
+            cell.setClickable(true);
+            cell.setDefaultFocusHighlightEnabled(false);
+            cell.setPadding(Math.round(8 * d), Math.round(4 * d), Math.round(8 * d), Math.round(4 * d));
+
+            TvView tv = new TvView(this);
+            tv.setZOrderOnTop(true);
+            tv.setStreamVolume(0f);
+            tv.setCallback(new TvView.TvInputCallback() {
+                @Override
+                public void onConnectionFailed(String inputId) {
+                    Log.i(TAG, "q" + idx + " CONNECTION FAILED");
+                    setStatus(idx, "failed to start");
+                }
+
+                @Override
+                public void onVideoAvailable(String inputId) {
+                    Log.i(TAG, "q" + idx + " VIDEO AVAILABLE");
+                    setStatus(idx, idx == listening ? "live, sound on" : "live");
+                }
+
+                @Override
+                public void onVideoUnavailable(String inputId, int reason) {
+                    Log.i(TAG, "q" + idx + " video unavailable reason=" + reason);
+                    setStatus(idx, reason == TvInputManager.VIDEO_UNAVAILABLE_REASON_WEAK_SIGNAL
+                            ? "no signal" : "starting...");
+                }
+            });
+            TextView panel = new TextView(this);
+            panel.setGravity(Gravity.CENTER);
+            panel.setTextColor(0xE6FFFFFF);
+            panel.setTextSize(26);
+            panel.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
+            panel.setBackgroundColor(0xFF14161C);
+            FrameLayout holder = new FrameLayout(this);
+            holder.addView(tv, new FrameLayout.LayoutParams(cellW, cellH));
+            holder.addView(panel, new FrameLayout.LayoutParams(cellW, cellH));
+            cell.addView(holder, new LinearLayout.LayoutParams(cellW, cellH));
+            panels[i] = panel;
+            holders[i] = holder;
+            cells[i] = cell;
+
+            TextView label = new TextView(this);
+            label.setTextSize(14);
+            label.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            label.setTextColor(0xCCFFFFFF);
+            label.setPadding(0, Math.round(6 * d), 0, 0);
+            cell.addView(label);
+
+            cell.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    if (isWeb(ids[idx])) {
+                        enterWeb(idx);
+                        return;
+                    }
+                    long now = SystemClock.uptimeMillis();
+                    if (lastClickCell == idx && now - lastClickAt < DOUBLE_CLICK_MS) {
+                        lastClickCell = -1;
+                        choose(idx);
+                    } else {
+                        lastClickCell = idx;
+                        lastClickAt = now;
+                        listen(idx);
+                    }
+                }
+            });
+            cell.setOnLongClickListener(new View.OnLongClickListener() {
+                @Override
+                public boolean onLongClick(View v) {
+                    choose(idx);
+                    return true;
+                }
+            });
+            cell.setOnFocusChangeListener(new View.OnFocusChangeListener() {
+                @Override
+                public void onFocusChange(View v, boolean has) {
+                    v.setBackgroundColor(has ? 0x40FFFFFF : 0);
+                }
+            });
+            views[i] = tv;
+            labels[i] = label;
+            setStatus(i, ids[i] == null ? "empty" : "starting...");
+            row.addView(cell);
+        }
+        setContentView(grid);
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        // Start quadrants one after another so a failure points at the quadrant that hit the limit.
+        for (int i = 0; i < CELLS; i++) {
+            final int idx = i;
+            views[i].postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    tuneCell(idx);
+                }
+            }, 700L * i);
+        }
+        ((View) views[0].getParent()).requestFocus();
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        for (TvView v : views) v.reset();
+        finish();
+    }
+
+    private void tuneCell(int idx) {
+        if (isWeb(ids[idx])) {
+            showWeb(idx);
+            return;
+        }
+        if (webs[idx] != null) webs[idx].setVisibility(View.GONE);
+        if (ids[idx] == null) {
+            views[idx].reset();
+            showText(idx, "Empty", "Press OK twice to choose");
+            setStatus(idx, "empty");
+            return;
+        }
+        if (!ids[idx].endsWith(APPLE_TV_SUFFIX)) { // text only: no video session is opened
+            views[idx].reset();
+            showText(idx, nameOf(ids[idx]), stateText(ids[idx]));
+            setStatus(idx, "text");
+            return;
+        }
+        panels[idx].setVisibility(View.GONE);
+        views[idx].setVisibility(View.VISIBLE);
+        setStatus(idx, "starting...");
+        views[idx].tune(ids[idx], TvContract.buildChannelUriForPassthroughInput(ids[idx]));
+    }
+
+    /** Pick which input a quadrant shows. */
+    private void choose(final int idx) {
+        final String[] items = new String[1 + inputs.size() + SITES.length];
+        items[0] = "None";
+        for (int i = 0; i < inputs.size(); i++) items[i + 1] = name(this, inputs.get(i));
+        for (int i = 0; i < SITES.length; i++) items[1 + inputs.size() + i] = SITES[i][0] + " (web)";
+        new AlertDialog.Builder(this)
+                .setTitle("Quadrant " + (idx + 1))
+                .setItems(items, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        ids[idx] = which == 0 ? null
+                                : which <= inputs.size() ? inputs.get(which - 1).getId()
+                                : WEB + SITES[which - 1 - inputs.size()][0];
+                        prefs.edit().putString("mvt" + idx, ids[idx] == null ? "" : ids[idx]).apply();
+                        tuneCell(idx);
+                    }
+                })
+                .show();
+    }
+
+    private void listen(int idx) {
+        listening = idx;
+        for (int i = 0; i < CELLS; i++) views[i].setStreamVolume(i == idx ? 1f : 0f);
+        for (int i = 0; i < CELLS; i++) {
+            if (ids[i] != null && ids[i].endsWith(APPLE_TV_SUFFIX)) setStatus(i, i == idx ? "live, sound on" : "live");
+        }
+    }
+
+    private void setStatus(int idx, String status) {
+        if (labels[idx] == null) return;
+        String n = ids[idx] == null ? "Empty" : nameOf(ids[idx]);
+        labels[idx].setText(ids[idx] == null ? status : n + "  ·  " + status);
+    }
+
+    private String nameOf(String id) {
+        if (isWeb(id)) return id.substring(WEB.length());
+        for (TvInputInfo info : inputs) if (info.getId().equals(id)) return name(this, info);
+        return id;
+    }
+
+    private static boolean isWeb(String id) {
+        return id != null && id.startsWith(WEB);
+    }
+
+    private static String siteUrl(String id) {
+        for (String[] site : SITES) if ((WEB + site[0]).equals(id)) return site[1];
+        return null;
+    }
+
+    private void showWeb(int idx) {
+        views[idx].reset();
+        views[idx].setVisibility(View.GONE);
+        panels[idx].setVisibility(View.GONE);
+        WebView w = webs[idx];
+        if (w == null) {
+            w = new WebView(this);
+            WebSettings ws = w.getSettings();
+            ws.setJavaScriptEnabled(true);
+            ws.setDomStorageEnabled(true);
+            ws.setMediaPlaybackRequiresUserGesture(false);
+            ws.setUserAgentString(TV_UA);
+            w.setWebViewClient(new WebViewClient());
+            w.setFocusable(false);
+            holders[idx].addView(w, new FrameLayout.LayoutParams(cellW, cellH));
+            webs[idx] = w;
+        }
+        w.setVisibility(View.VISIBLE);
+        String url = siteUrl(ids[idx]);
+        if (url != null && !url.equals(w.getUrl())) w.loadUrl(url);
+        setStatus(idx, "web  ·  OK to use, Back to exit, hold OK to change");
+    }
+
+    /** Hand the remote to the web page in this quadrant (Back returns to the grid). */
+    private void enterWeb(int idx) {
+        WebView w = webs[idx];
+        if (w == null) return;
+        webActive = idx;
+        w.setFocusable(true);
+        w.setFocusableInTouchMode(true);
+        w.requestFocus();
+        setStatus(idx, "web  ·  Back to leave");
+    }
+
+    private void leaveWeb() {
+        WebView w = webs[webActive];
+        int idx = webActive;
+        webActive = -1;
+        if (w != null) w.setFocusable(false);
+        cells[idx].requestFocus();
+        setStatus(idx, "web  ·  OK to use, Back to exit, hold OK to change");
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (webActive >= 0) leaveWeb();
+        else super.onBackPressed();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        for (int i = 0; i < CELLS; i++) {
+            if (webs[i] != null) {
+                webs[i].destroy();
+                webs[i] = null;
+            }
+        }
+    }
+
+    private void showText(int idx, String title, String detail) {
+        views[idx].setVisibility(View.GONE);
+        panels[idx].setVisibility(View.VISIBLE);
+        panels[idx].setText(title + "\n" + detail);
+    }
+
+    private String stateText(String id) {
+        switch (tim.getInputState(id)) {
+            case TvInputManager.INPUT_STATE_CONNECTED:
+                return "Connected";
+            case TvInputManager.INPUT_STATE_CONNECTED_STANDBY:
+                return "Nothing playing";
+            default:
+                return "No device";
+        }
+    }
+
+    /** Quadrant 1 is the Apple TV; the rest take the other inputs in order. */
+    private String defaultFor(int i) {
+        List<String> order = new ArrayList<>();
+        for (TvInputInfo info : inputs) if (info.getId().endsWith(APPLE_TV_SUFFIX)) order.add(info.getId());
+        for (TvInputInfo info : inputs) if (!info.getId().endsWith(APPLE_TV_SUFFIX)) order.add(info.getId());
+        if (i == 1) return WEB + "YouTube";
+        int k = i == 0 ? 0 : i - 1;
+        return k < order.size() ? order.get(k) : null;
+    }
+
+    private boolean known(String id) {
+        if (isWeb(id)) return siteUrl(id) != null;
+        for (TvInputInfo info : inputs) if (info.getId().equals(id)) return true;
+        return false;
+    }
+
+    private static String emptyToNull(String s) {
+        return s == null || s.isEmpty() ? null : s;
+    }
+
+    private static String name(Context c, TvInputInfo info) {
+        if (info.getId().endsWith(APPLE_TV_SUFFIX)) return "Apple TV";
+        CharSequence custom = info.loadCustomLabel(c);
+        return String.valueOf(custom != null && custom.length() > 0 ? custom : info.loadLabel(c));
+    }
+}

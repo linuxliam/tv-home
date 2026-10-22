@@ -1,0 +1,631 @@
+package com.liam.homescreen;
+
+import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.BitmapShader;
+import android.graphics.Canvas;
+import android.graphics.ColorFilter;
+import android.graphics.LinearGradient;
+import android.graphics.Paint;
+import android.graphics.Path;
+import android.graphics.PixelFormat;
+import android.graphics.RectF;
+import android.graphics.Shader;
+import android.graphics.Typeface;
+import android.graphics.drawable.Drawable;
+import android.os.SystemClock;
+import android.text.TextPaint;
+import android.text.TextUtils;
+import android.view.View;
+
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+
+/**
+ * A PlayStation 3 style cross media bar: categories run across the top, the selected category's
+ * items run down beneath it. Dressed in a retro arcade (synthwave) look: neon colours, a sun and
+ * grid floor, drifting waves and scanlines. Everything is drawn on one canvas.
+ */
+final class XmbView extends View {
+    static final int G_PLAY = 0, G_GRID = 1, G_INPUT = 2, G_GEAR = 3, G_PICTURE = 4,
+            G_SOUND = 5, G_WIFI = 6, G_MULTI = 7, G_PIN = 8, G_SUN = 9, G_CLOUD = 10, G_RAIN = 11,
+            G_SNOW = 12, G_STORM = 13, G_FOG = 14, G_CAL = 15, G_LIVE = 16;
+
+    static final class Item {
+        final String title;
+        final String sub;
+        final Drawable icon;
+        final Runnable action;
+        final Runnable longAction;
+
+        Item(String title, String sub, Drawable icon, Runnable action, Runnable longAction) {
+            this.title = title;
+            this.sub = sub;
+            this.icon = icon;
+            this.action = action;
+            this.longAction = longAction;
+        }
+    }
+
+    static final class Cat {
+        final String title;
+        final int glyph;
+        final List<Item> items = new ArrayList<>();
+        int sel;
+        float selPos;
+
+        Cat(String title, int glyph) {
+            this.title = title;
+            this.glyph = glyph;
+        }
+    }
+
+    private static final int MAGENTA = 0xFFFF2BD6;
+    private static final int CYAN = 0xFF00E5FF;
+    private static final int YELLOW = 0xFFFFE600;
+    private static final int GREEN = 0xFF39FF88;
+    private static final int[] CAT_COLORS = {MAGENTA, CYAN, YELLOW, GREEN};
+    private static final int[] WAVE_COLORS = {0x2600E5FF, 0x26FF2BD6, 0x207A2BFF, 0x1AFFE600};
+
+    private final List<Cat> cats = new ArrayList<>();
+    private int catIndex;
+    private float catPos;
+    private final long start = SystemClock.uptimeMillis();
+    private final float d;
+
+    private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final TextPaint titlePaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+    private final TextPaint subPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint labelPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint timePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint datePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint scanPaint = new Paint();
+    private final Path path = new Path();
+    private final RectF rect = new RectF();
+    private LinearGradient sky;
+    private final SimpleDateFormat timeFmt = new SimpleDateFormat("h:mm", Locale.getDefault());
+    private final SimpleDateFormat dateFmt = new SimpleDateFormat("EEE d MMM", Locale.getDefault());
+    private long clockStamp;
+    private String timeText = "";
+    private String dateText = "";
+
+    private int wGlyph = -1;
+    private String wTemp = "";
+    private String wDesc = "";
+
+    // layout, set in onSizeChanged
+    private float barY, anchorX, spacing, catIcon, itemsTop, rowH, itemIcon;
+
+    XmbView(Context c) {
+        super(c);
+        d = c.getResources().getDisplayMetrics().density;
+        Typeface mono = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD);
+        titlePaint.setTypeface(mono);
+        subPaint.setTypeface(Typeface.MONOSPACE);
+        labelPaint.setTypeface(mono);
+        timePaint.setTypeface(mono);
+        datePaint.setTypeface(Typeface.MONOSPACE);
+        titlePaint.setLetterSpacing(0.04f);
+        labelPaint.setLetterSpacing(0.18f);
+        datePaint.setLetterSpacing(0.12f);
+        labelPaint.setTextAlign(Paint.Align.CENTER);
+        timePaint.setTextAlign(Paint.Align.RIGHT);
+        datePaint.setTextAlign(Paint.Align.RIGHT);
+
+        // 1x4 px pattern: one faint dark line in every four
+        Bitmap bm = Bitmap.createBitmap(4, 4, Bitmap.Config.ARGB_8888);
+        for (int x = 0; x < 4; x++) bm.setPixel(x, 3, 0x38000000);
+        scanPaint.setShader(new BitmapShader(bm, Shader.TileMode.REPEAT, Shader.TileMode.REPEAT));
+        setFocusable(false);
+    }
+
+    // ------------------------------------------------------------------ data & navigation
+
+    void setCategories(List<Cat> fresh) {
+        Map<String, Integer> sels = new HashMap<>();
+        String current = catIndex < cats.size() ? cats.get(catIndex).title : null;
+        for (Cat old : cats) sels.put(old.title, old.sel);
+        cats.clear();
+        cats.addAll(fresh);
+        for (Cat c : cats) {
+            Integer s = sels.get(c.title);
+            c.sel = s == null ? 0 : Math.max(0, Math.min(s, c.items.size() - 1));
+            c.selPos = c.sel;
+        }
+        for (int i = 0; i < cats.size(); i++) if (cats.get(i).title.equals(current)) catIndex = i;
+        catIndex = Math.max(0, Math.min(catIndex, cats.size() - 1));
+    }
+
+    /** Shown top left. Pass a negative glyph to hide it. */
+    void setWeather(int glyph, String temp, String desc) {
+        wGlyph = glyph;
+        wTemp = temp == null ? "" : temp;
+        wDesc = desc == null ? "" : desc;
+    }
+
+    void moveCat(int dir) {
+        if (cats.isEmpty()) return;
+        catIndex = Math.max(0, Math.min(cats.size() - 1, catIndex + dir));
+    }
+
+    void moveItem(int dir) {
+        if (cats.isEmpty()) return;
+        Cat c = cats.get(catIndex);
+        c.sel = Math.max(0, Math.min(c.items.size() - 1, c.sel + dir));
+    }
+
+    void goHome() {
+        if (cats.isEmpty()) return;
+        catIndex = 0;
+        for (Cat c : cats) c.sel = 0;
+    }
+
+    void activate() {
+        Item it = current();
+        if (it != null && it.action != null) it.action.run();
+    }
+
+    void longActivate() {
+        Item it = current();
+        if (it != null && it.longAction != null) it.longAction.run();
+    }
+
+    private Item current() {
+        if (cats.isEmpty()) return null;
+        Cat c = cats.get(catIndex);
+        return c.items.isEmpty() ? null : c.items.get(c.sel);
+    }
+
+    // ------------------------------------------------------------------ drawing
+
+    @Override
+    protected void onSizeChanged(int w, int h, int ow, int oh) {
+        barY = h * 0.27f;
+        anchorX = w * 0.2f;
+        spacing = w * 0.115f;
+        catIcon = h * 0.085f;
+        itemsTop = barY + h * 0.18f;
+        rowH = h * 0.118f;
+        itemIcon = h * 0.075f;
+        sky = new LinearGradient(0, 0, 0, h, new int[]{0xFF0B0426, 0xFF1E0845, 0xFF06020F},
+                new float[]{0f, 0.62f, 1f}, Shader.TileMode.CLAMP);
+        titlePaint.setTextSize(h * 0.043f);
+        subPaint.setTextSize(h * 0.026f);
+        labelPaint.setTextSize(h * 0.03f);
+        timePaint.setTextSize(h * 0.075f);
+        datePaint.setTextSize(h * 0.027f);
+    }
+
+    @Override
+    protected void onDraw(Canvas c) {
+        float w = getWidth();
+        float h = getHeight();
+        float t = (SystemClock.uptimeMillis() - start) / 1000f;
+
+        catPos += (catIndex - catPos) * 0.2f;
+        if (Math.abs(catIndex - catPos) < 0.002f) catPos = catIndex;
+        for (Cat cat : cats) {
+            cat.selPos += (cat.sel - cat.selPos) * 0.25f;
+            if (Math.abs(cat.sel - cat.selPos) < 0.002f) cat.selPos = cat.sel;
+        }
+
+        drawBackground(c, w, h, t);
+        drawClock(c, w, h);
+        drawBar(c, w, h);
+        drawItems(c, w, h);
+        c.drawRect(0, 0, w, h, scanPaint);
+        postInvalidateOnAnimation();
+    }
+
+    private void drawBackground(Canvas c, float w, float h, float t) {
+        paint.reset();
+        paint.setShader(sky);
+        c.drawRect(0, 0, w, h, paint);
+        paint.reset();
+        paint.setAntiAlias(true);
+
+        // sun
+        float horizon = h * 0.76f;
+        float sunR = h * 0.21f;
+        float sx = w * 0.8f;
+        paint.setShader(new LinearGradient(0, horizon - sunR, 0, horizon + sunR * 0.4f,
+                0xCCFFE600, 0xCCFF2BD6, Shader.TileMode.CLAMP));
+        c.drawCircle(sx, horizon - sunR * 0.15f, sunR, paint);
+        paint.setShader(null);
+
+        // drifting waves
+        for (int k = 0; k < 4; k++) drawWave(c, w, h, t, k);
+
+        // floor
+        paint.setColor(0xFF08020F);
+        c.drawRect(0, horizon, w, h, paint);
+        paint.setStyle(Paint.Style.STROKE);
+        paint.setStrokeWidth(Math.max(1.5f, d * 0.9f));
+        float vx = w / 2f;
+        for (int i = -14; i <= 14; i++) {
+            paint.setColor(i % 2 == 0 ? 0x88FF2BD6 : 0x6600E5FF);
+            c.drawLine(vx + i * w * 0.012f, horizon, vx + i * w * 0.15f, h, paint);
+        }
+        float shift = (t * 0.35f) % 1f;
+        for (int n = 0; n < 10; n++) {
+            float f = (n + shift) / 10f;
+            float y = horizon + (h - horizon) * f * f;
+            paint.setColor(((int) (0x22 + 0x77 * f) << 24) | 0x00FF2BD6);
+            c.drawLine(0, y, w, y, paint);
+        }
+        // horizon glow line
+        paint.setColor(0xCC00E5FF);
+        paint.setStrokeWidth(Math.max(2f, d * 1.2f));
+        c.drawLine(0, horizon, w, horizon, paint);
+        paint.reset();
+        paint.setAntiAlias(true);
+    }
+
+    private void drawWave(Canvas c, float w, float h, float t, int k) {
+        float base = h * (0.34f + 0.09f * k);
+        float amp = h * (0.05f + 0.012f * k);
+        float freq = (float) (2 * Math.PI) / (w * (0.7f + 0.25f * k));
+        float speed = 0.32f + 0.12f * k;
+        float thick = h * (0.04f + 0.012f * k);
+        int steps = 36;
+        path.reset();
+        for (int i = 0; i <= steps; i++) {
+            float x = w * i / steps;
+            float y = base + amp * (float) Math.sin(x * freq + t * speed + k * 1.7f)
+                    + amp * 0.4f * (float) Math.sin(x * freq * 2.3f - t * speed * 0.7f);
+            if (i == 0) path.moveTo(x, y);
+            else path.lineTo(x, y);
+        }
+        for (int i = steps; i >= 0; i--) {
+            float x = w * i / steps;
+            float y = base + amp * (float) Math.sin(x * freq + t * speed + k * 1.7f)
+                    + amp * 0.4f * (float) Math.sin(x * freq * 2.3f - t * speed * 0.7f)
+                    + thick * (0.6f + 0.4f * (float) Math.sin(x * freq * 1.3f + k));
+            path.lineTo(x, y);
+        }
+        path.close();
+        paint.setColor(WAVE_COLORS[k]);
+        c.drawPath(path, paint);
+    }
+
+    private void drawClock(Canvas c, float w, float h) {
+        long now = System.currentTimeMillis();
+        if (now - clockStamp > 1000) {
+            clockStamp = now;
+            timeText = timeFmt.format(now);
+            dateText = dateFmt.format(now).toUpperCase(Locale.getDefault());
+        }
+        float right = w - w * 0.045f;
+        timePaint.setColor(0xFFFFFFFF);
+        timePaint.setShadowLayer(d * 8, 0, 0, CYAN);
+        c.drawText(timeText, right, h * 0.1f, timePaint);
+        datePaint.setColor(0xCCFF9BEA);
+        datePaint.setShadowLayer(d * 4, 0, 0, MAGENTA);
+        c.drawText(dateText, right, h * 0.1f + h * 0.04f, datePaint);
+
+        if (wGlyph >= 0) { // weather, top left
+            float left = w * 0.045f;
+            float s = h * 0.075f;
+            paint.reset();
+            paint.setAntiAlias(true);
+            paint.setShadowLayer(d * 6, 0, 0, YELLOW);
+            drawGlyph(c, wGlyph, left + s / 2, h * 0.075f, s, YELLOW, 255, paint);
+            timePaint.setTextAlign(Paint.Align.LEFT);
+            timePaint.setTextSize(h * 0.06f);
+            timePaint.setShadowLayer(d * 8, 0, 0, MAGENTA);
+            c.drawText(wTemp, left + s * 1.3f, h * 0.088f, timePaint);
+            timePaint.setTextAlign(Paint.Align.RIGHT);
+            timePaint.setTextSize(h * 0.075f);
+            datePaint.setTextAlign(Paint.Align.LEFT);
+            datePaint.setColor(0xCCFF9BEA);
+            c.drawText(wDesc, left + s * 1.3f, h * 0.088f + h * 0.04f, datePaint);
+            datePaint.setTextAlign(Paint.Align.RIGHT);
+        }
+    }
+
+    private void drawBar(Canvas c, float w, float h) {
+        for (int i = 0; i < cats.size(); i++) {
+            Cat cat = cats.get(i);
+            float dx = i - catPos;
+            float dist = Math.abs(dx);
+            float x = anchorX + dx * spacing;
+            float scale = 1f + 0.3f * Math.max(0f, 1f - dist);
+            float a = 1f - 0.58f * Math.min(1f, dist);
+            int color = CAT_COLORS[i % CAT_COLORS.length];
+            paint.reset();
+            paint.setAntiAlias(true);
+            paint.setShadowLayer(d * 8 * Math.max(0f, 1f - dist), 0, 0, color);
+            drawGlyph(c, cat.glyph, x, barY, catIcon * scale, color, (int) (255 * a), paint);
+
+            float la = Math.max(0f, 1f - dist * 1.6f);
+            if (la > 0f) {
+                labelPaint.setColor(0xFFFFFFFF);
+                labelPaint.setAlpha((int) (255 * la));
+                labelPaint.setShadowLayer(d * 6, 0, 0, color);
+                c.drawText(cat.title.toUpperCase(Locale.getDefault()), x, barY + catIcon * 1.1f, labelPaint);
+            }
+        }
+    }
+
+    private void drawItems(Canvas c, float w, float h) {
+        for (int i = 0; i < cats.size(); i++) {
+            Cat cat = cats.get(i);
+            float dx = i - catPos;
+            float dist = Math.abs(dx);
+            if (dist >= 1f) continue;
+            float catAlpha = 1f - dist;
+            float x = anchorX + dx * spacing;
+            int color = CAT_COLORS[i % CAT_COLORS.length];
+            for (int j = 0; j < cat.items.size(); j++) {
+                Item it = cat.items.get(j);
+                float off = j - cat.selPos;
+                float y = itemsTop + off * rowH;
+                // rows that have scrolled up under the bar fade out
+                float fade = Math.max(0f, Math.min(1f, (y - (barY + h * 0.07f)) / (h * 0.06f)));
+                if (fade <= 0f || y > h + rowH) continue;
+                float near = Math.max(0f, 1f - Math.abs(off));
+                float scale = 1f + 0.22f * near;
+                float a = catAlpha * fade * (0.55f + 0.45f * near);
+                int alpha = (int) (255 * a);
+
+                float size = itemIcon * scale;
+                if (it.icon != null) {
+                    it.icon.setBounds((int) (x - size / 2), (int) (y - size / 2),
+                            (int) (x + size / 2), (int) (y + size / 2));
+                    it.icon.setAlpha(alpha);
+                    it.icon.draw(c);
+                }
+                float tx = x + size / 2 + d * 14;
+                titlePaint.setTextSize(h * 0.043f * scale);
+                titlePaint.setColor(0xFFFFFFFF);
+                titlePaint.setAlpha(alpha);
+                titlePaint.setShadowLayer(d * 6 * near, 0, 0, color);
+                float maxW = w - tx - w * 0.05f;
+                String title = TextUtils.ellipsize(it.title, titlePaint, maxW, TextUtils.TruncateAt.END).toString();
+                boolean hasSub = it.sub != null && !it.sub.isEmpty();
+                float ty = hasSub ? y - h * 0.002f : y + titlePaint.getTextSize() * 0.33f;
+                c.drawText(title, tx, ty, titlePaint);
+                if (hasSub) {
+                    subPaint.setColor(0xFFFF9BEA);
+                    subPaint.setAlpha((int) (alpha * 0.85f));
+                    String sub = TextUtils.ellipsize(it.sub, subPaint, maxW, TextUtils.TruncateAt.END).toString();
+                    c.drawText(sub, tx, y + subPaint.getTextSize() * 1.25f + h * 0.004f, subPaint);
+                }
+                if (near > 0.6f) { // neon underline on the selected row
+                    paint.reset();
+                    paint.setAntiAlias(true);
+                    paint.setShader(new LinearGradient(tx, 0, tx + w * 0.4f, 0,
+                            (color & 0x00FFFFFF) | ((int) (200 * a) << 24), 0x00000000, Shader.TileMode.CLAMP));
+                    rect.set(tx, y + size * 0.62f, tx + w * 0.4f, y + size * 0.62f + Math.max(2f, d * 1.5f));
+                    c.drawRect(rect, paint);
+                    paint.setShader(null);
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ glyphs
+
+    static void drawGlyph(Canvas c, int g, float cx, float cy, float s, int color, int alpha, Paint p) {
+        p.setStyle(Paint.Style.STROKE);
+        p.setStrokeWidth(Math.max(2f, s * 0.075f));
+        p.setStrokeCap(Paint.Cap.ROUND);
+        p.setStrokeJoin(Paint.Join.ROUND);
+        p.setColor(color);
+        p.setAlpha(alpha);
+        float h = s / 2f;
+        RectF r = new RectF();
+        Path path = new Path();
+        switch (g) {
+            case G_PLAY:
+                r.set(cx - h, cy - h * 0.75f, cx + h, cy + h * 0.75f);
+                c.drawRoundRect(r, s * 0.12f, s * 0.12f, p);
+                p.setStyle(Paint.Style.FILL);
+                path.moveTo(cx - h * 0.25f, cy - h * 0.38f);
+                path.lineTo(cx + h * 0.38f, cy);
+                path.lineTo(cx - h * 0.25f, cy + h * 0.38f);
+                path.close();
+                c.drawPath(path, p);
+                break;
+            case G_GRID: {
+                float q = s * 0.38f;
+                float gap = s * 0.1f;
+                for (int row = 0; row < 2; row++) {
+                    for (int col = 0; col < 2; col++) {
+                        float l = cx - q - gap / 2 + col * (q + gap);
+                        float tp = cy - q - gap / 2 + row * (q + gap);
+                        r.set(l, tp, l + q, tp + q);
+                        c.drawRoundRect(r, s * 0.07f, s * 0.07f, p);
+                    }
+                }
+                break;
+            }
+            case G_MULTI: {
+                float q = s * 0.38f;
+                float gap = s * 0.1f;
+                for (int row = 0; row < 2; row++) {
+                    for (int col = 0; col < 2; col++) {
+                        float l = cx - q - gap / 2 + col * (q + gap);
+                        float tp = cy - q - gap / 2 + row * (q + gap);
+                        r.set(l, tp, l + q, tp + q);
+                        p.setStyle(row == 0 && col == 0 ? Paint.Style.FILL : Paint.Style.STROKE);
+                        c.drawRoundRect(r, s * 0.07f, s * 0.07f, p);
+                    }
+                }
+                break;
+            }
+            case G_INPUT:
+                r.set(cx - h, cy - h * 0.62f, cx + h, cy + h * 0.32f);
+                c.drawRoundRect(r, s * 0.08f, s * 0.08f, p);
+                c.drawLine(cx, cy + h * 0.32f, cx, cy + h * 0.7f, p);
+                c.drawLine(cx - h * 0.45f, cy + h * 0.7f, cx + h * 0.45f, cy + h * 0.7f, p);
+                break;
+            case G_GEAR:
+                c.drawCircle(cx, cy, h * 0.46f, p);
+                c.drawCircle(cx, cy, h * 0.2f, p);
+                for (int k = 0; k < 8; k++) {
+                    double a = k * Math.PI / 4;
+                    c.drawLine(cx + (float) Math.cos(a) * h * 0.62f, cy + (float) Math.sin(a) * h * 0.62f,
+                            cx + (float) Math.cos(a) * h * 0.92f, cy + (float) Math.sin(a) * h * 0.92f, p);
+                }
+                break;
+            case G_PICTURE:
+                r.set(cx - h, cy - h * 0.72f, cx + h, cy + h * 0.72f);
+                c.drawRoundRect(r, s * 0.08f, s * 0.08f, p);
+                path.moveTo(cx - h * 0.8f, cy + h * 0.5f);
+                path.lineTo(cx - h * 0.2f, cy - h * 0.1f);
+                path.lineTo(cx + h * 0.15f, cy + h * 0.3f);
+                path.lineTo(cx + h * 0.4f, cy + h * 0.05f);
+                path.lineTo(cx + h * 0.8f, cy + h * 0.5f);
+                c.drawPath(path, p);
+                c.drawCircle(cx + h * 0.45f, cy - h * 0.35f, h * 0.15f, p);
+                break;
+            case G_SOUND:
+                path.moveTo(cx - h * 0.9f, cy - h * 0.3f);
+                path.lineTo(cx - h * 0.5f, cy - h * 0.3f);
+                path.lineTo(cx - h * 0.1f, cy - h * 0.7f);
+                path.lineTo(cx - h * 0.1f, cy + h * 0.7f);
+                path.lineTo(cx - h * 0.5f, cy + h * 0.3f);
+                path.lineTo(cx - h * 0.9f, cy + h * 0.3f);
+                path.close();
+                c.drawPath(path, p);
+                for (int k = 1; k <= 2; k++) {
+                    float rad = h * (0.3f + 0.4f * k);
+                    r.set(cx - h * 0.1f - rad, cy - rad, cx - h * 0.1f + rad, cy + rad);
+                    c.drawArc(r, -40, 80, false, p);
+                }
+                break;
+            case G_WIFI: {
+                float oy = cy + h * 0.55f;
+                for (int k = 1; k <= 3; k++) {
+                    float rad = h * 0.5f * k;
+                    r.set(cx - rad, oy - rad, cx + rad, oy + rad);
+                    c.drawArc(r, -135, 90, false, p);
+                }
+                p.setStyle(Paint.Style.FILL);
+                c.drawCircle(cx, oy, h * 0.1f, p);
+                break;
+            }
+            case G_SUN:
+                c.drawCircle(cx, cy, h * 0.38f, p);
+                for (int k = 0; k < 8; k++) {
+                    double a = k * Math.PI / 4;
+                    c.drawLine(cx + (float) Math.cos(a) * h * 0.58f, cy + (float) Math.sin(a) * h * 0.58f,
+                            cx + (float) Math.cos(a) * h * 0.88f, cy + (float) Math.sin(a) * h * 0.88f, p);
+                }
+                break;
+            case G_CLOUD:
+                cloud(c, cx, cy, h, p);
+                break;
+            case G_RAIN:
+                cloud(c, cx, cy - h * 0.25f, h, p);
+                for (int k = -1; k <= 1; k++) {
+                    c.drawLine(cx + k * h * 0.4f, cy + h * 0.35f, cx + k * h * 0.4f - h * 0.12f, cy + h * 0.75f, p);
+                }
+                break;
+            case G_SNOW:
+                cloud(c, cx, cy - h * 0.25f, h, p);
+                p.setStyle(Paint.Style.FILL);
+                for (int k = -1; k <= 1; k++) c.drawCircle(cx + k * h * 0.4f, cy + h * 0.58f, h * 0.07f, p);
+                break;
+            case G_STORM:
+                cloud(c, cx, cy - h * 0.25f, h, p);
+                path.moveTo(cx + h * 0.05f, cy + h * 0.25f);
+                path.lineTo(cx - h * 0.2f, cy + h * 0.6f);
+                path.lineTo(cx + h * 0.1f, cy + h * 0.6f);
+                path.lineTo(cx - h * 0.1f, cy + h * 0.95f);
+                c.drawPath(path, p);
+                break;
+            case G_FOG:
+                for (int k = -1; k <= 1; k++) {
+                    c.drawLine(cx - h * 0.8f + Math.abs(k) * h * 0.1f, cy + k * h * 0.4f,
+                            cx + h * 0.8f - Math.abs(k) * h * 0.1f, cy + k * h * 0.4f, p);
+                }
+                break;
+            case G_CAL:
+                r.set(cx - h * 0.85f, cy - h * 0.7f, cx + h * 0.85f, cy + h * 0.85f);
+                c.drawRoundRect(r, s * 0.1f, s * 0.1f, p);
+                c.drawLine(cx - h * 0.85f, cy - h * 0.25f, cx + h * 0.85f, cy - h * 0.25f, p);
+                c.drawLine(cx - h * 0.4f, cy - h * 0.95f, cx - h * 0.4f, cy - h * 0.5f, p);
+                c.drawLine(cx + h * 0.4f, cy - h * 0.95f, cx + h * 0.4f, cy - h * 0.5f, p);
+                p.setStyle(Paint.Style.FILL);
+                for (int row = 0; row < 2; row++) {
+                    for (int col = -1; col <= 1; col++) {
+                        c.drawCircle(cx + col * h * 0.45f, cy + h * 0.1f + row * h * 0.4f, h * 0.07f, p);
+                    }
+                }
+                break;
+            case G_LIVE:
+                p.setStyle(Paint.Style.FILL);
+                c.drawCircle(cx, cy, h * 0.14f, p);
+                p.setStyle(Paint.Style.STROKE);
+                for (int k = 1; k <= 3; k++) {
+                    float rad = h * 0.32f * k;
+                    r.set(cx - rad, cy - rad, cx + rad, cy + rad);
+                    c.drawArc(r, -50, 100, false, p);
+                    c.drawArc(r, 130, 100, false, p);
+                }
+                break;
+            case G_PIN:
+                c.drawCircle(cx, cy - h * 0.3f, h * 0.45f, p);
+                c.drawLine(cx, cy + h * 0.15f, cx, cy + h * 0.9f, p);
+                break;
+            default:
+                break;
+        }
+    }
+
+    private static void cloud(Canvas c, float cx, float cy, float h, Paint p) {
+        Path a = new Path();
+        a.addCircle(cx - h * 0.4f, cy + h * 0.1f, h * 0.35f, Path.Direction.CW);
+        Path b = new Path();
+        b.addCircle(cx + h * 0.05f, cy - h * 0.2f, h * 0.5f, Path.Direction.CW);
+        a.op(b, Path.Op.UNION);
+        Path e = new Path();
+        e.addCircle(cx + h * 0.5f, cy + h * 0.1f, h * 0.32f, Path.Direction.CW);
+        a.op(e, Path.Op.UNION);
+        Path base = new Path();
+        base.addRect(cx - h * 0.4f, cy + h * 0.1f, cx + h * 0.5f, cy + h * 0.42f, Path.Direction.CW);
+        a.op(base, Path.Op.UNION);
+        c.drawPath(a, p);
+    }
+
+    /** Small glyph usable as an item icon. */
+    static final class GlyphDrawable extends Drawable {
+        private final int glyph;
+        private final int color;
+        private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private int alpha = 255;
+
+        GlyphDrawable(int glyph, int color) {
+            this.glyph = glyph;
+            this.color = color;
+        }
+
+        @Override
+        public void draw(Canvas c) {
+            p.reset();
+            p.setAntiAlias(true);
+            float s = Math.min(getBounds().width(), getBounds().height());
+            drawGlyph(c, glyph, getBounds().exactCenterX(), getBounds().exactCenterY(), s * 0.9f, color, alpha, p);
+        }
+
+        @Override
+        public void setAlpha(int a) {
+            alpha = a;
+        }
+
+        @Override
+        public void setColorFilter(ColorFilter cf) {
+        }
+
+        @Override
+        public int getOpacity() {
+            return PixelFormat.TRANSLUCENT;
+        }
+    }
+}

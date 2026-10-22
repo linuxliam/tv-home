@@ -1,0 +1,249 @@
+package com.liam.homescreen;
+
+import android.content.Context;
+import android.graphics.Typeface;
+import android.media.MediaPlayer;
+import android.media.tv.TvContract;
+import android.media.tv.TvInputManager;
+import android.media.tv.TvView;
+import android.net.Uri;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
+import android.text.style.RelativeSizeSpan;
+import android.view.Gravity;
+import android.view.View;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
+import android.widget.FrameLayout;
+import android.widget.TextView;
+import android.widget.VideoView;
+
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.List;
+import java.util.Locale;
+
+/**
+ * One live window on the home screen. It can show an HDMI input, a web page, an IPTV channel or a
+ * widget (clock, weather, calendar); the source is written as a string, see Sources.
+ */
+final class Pane extends FrameLayout {
+    private static final String TV_UA = "Mozilla/5.0 (SMART-TV; LINUX; Tizen 6.0) AppleWebKit/537.36 "
+            + "(KHTML, like Gecko) 76.0.3809.146/6.0 TV Safari/537.36";
+
+    private final Store store;
+    private final TvInputManager tim;
+    private final TvView tv;
+    private final TextView panel;
+    private WebView web;
+    private VideoView video;
+    private MediaPlayer player;
+    private String id;
+    private float volume;
+
+    Pane(Context c, Store store) {
+        super(c);
+        this.store = store;
+        this.tim = (TvInputManager) c.getSystemService(Context.TV_INPUT_SERVICE);
+        float d = c.getResources().getDisplayMetrics().density;
+        setBackgroundColor(0xFF0A0C12);
+
+        tv = new TvView(c);
+        tv.setZOrderOnTop(true);
+        tv.setStreamVolume(0f);
+        addView(tv, new LayoutParams(-1, -1));
+
+        panel = new TextView(c);
+        panel.setGravity(Gravity.CENTER);
+        panel.setTextColor(0xF2FFFFFF);
+        panel.setTextSize(15);
+        panel.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
+        panel.setBackgroundColor(0xE6101420);
+        panel.setPadding(Math.round(14 * d), Math.round(8 * d), Math.round(14 * d), Math.round(8 * d));
+        addView(panel, new LayoutParams(-1, -1));
+    }
+
+    String source() {
+        return id;
+    }
+
+    boolean isWeb() {
+        return Sources.isWeb(id);
+    }
+
+    WebView webView() {
+        return web;
+    }
+
+    /** Show a source. Showing the one that is already running does nothing. */
+    void show(String newId) {
+        if (newId == null || newId.isEmpty()) {
+            stop();
+            id = null;
+            return;
+        }
+        if (newId.equals(id) && (tv.getVisibility() == VISIBLE || panel.getVisibility() == VISIBLE
+                || (web != null && web.getVisibility() == VISIBLE) || (video != null && video.getVisibility() == VISIBLE))) {
+            return;
+        }
+        stop();
+        id = newId;
+        if (Sources.isWeb(id)) {
+            showWeb();
+        } else if (Sources.isIptv(id)) {
+            showIptv();
+        } else if (Sources.isWidget(id)) {
+            panel.setGravity(id.endsWith("calendar") ? Gravity.START | Gravity.CENTER_VERTICAL : Gravity.CENTER);
+            panel.setVisibility(VISIBLE);
+            tv.setVisibility(GONE);
+            tick();
+        } else if (tim != null && tim.getInputState(id) == TvInputManager.INPUT_STATE_CONNECTED) {
+            panel.setVisibility(GONE);
+            tv.setVisibility(VISIBLE);
+            tv.setStreamVolume(volume);
+            tv.tune(id, TvContract.buildChannelUriForPassthroughInput(id));
+        } else { // an input with nothing playing: text only, no video session
+            tv.setVisibility(GONE);
+            panel.setGravity(Gravity.CENTER);
+            panel.setText(inputState());
+            panel.setVisibility(VISIBLE);
+        }
+    }
+
+    private String inputState() {
+        if (tim == null) return "Input unavailable";
+        switch (tim.getInputState(id)) {
+            case TvInputManager.INPUT_STATE_CONNECTED_STANDBY:
+                return "Nothing playing";
+            default:
+                return "No device";
+        }
+    }
+
+    private void showWeb() {
+        tv.setVisibility(GONE);
+        panel.setVisibility(GONE);
+        if (web == null) {
+            web = new WebView(getContext());
+            WebSettings ws = web.getSettings();
+            ws.setJavaScriptEnabled(true);
+            ws.setDomStorageEnabled(true);
+            ws.setMediaPlaybackRequiresUserGesture(false);
+            ws.setUserAgentString(TV_UA);
+            web.setWebViewClient(new WebViewClient());
+            web.setFocusable(false);
+            addView(web, new LayoutParams(-1, -1));
+        }
+        web.setVisibility(VISIBLE);
+        String url = Sources.siteUrl(store, id);
+        if (url != null && !url.equals(web.getUrl())) web.loadUrl(url);
+    }
+
+    private void showIptv() {
+        tv.setVisibility(GONE);
+        panel.setVisibility(GONE);
+        if (video == null) {
+            video = new VideoView(getContext());
+            video.setZOrderOnTop(true);
+            video.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
+                @Override
+                public void onPrepared(MediaPlayer mp) {
+                    player = mp;
+                    mp.setVolume(volume, volume);
+                    mp.start();
+                }
+            });
+            video.setOnErrorListener(new MediaPlayer.OnErrorListener() {
+                @Override
+                public boolean onError(MediaPlayer mp, int what, int extra) {
+                    panel.setGravity(Gravity.CENTER);
+                    panel.setText("This channel won't play");
+                    panel.setVisibility(VISIBLE);
+                    return true;
+                }
+            });
+            addView(video, new LayoutParams(-1, -1, Gravity.CENTER));
+        }
+        video.setVisibility(VISIBLE);
+        video.stopPlayback();
+        video.setVideoURI(Uri.parse(Sources.iptvUrl(id)));
+    }
+
+    /** Release the video and hide everything (the web page is kept so it can resume quickly). */
+    void stop() {
+        tv.reset();
+        tv.setVisibility(GONE);
+        panel.setVisibility(GONE);
+        if (video != null) {
+            video.stopPlayback();
+            video.setVisibility(GONE);
+        }
+        player = null;
+        if (web != null) web.setVisibility(GONE);
+    }
+
+    void release() {
+        stop();
+        if (web != null) {
+            web.destroy();
+            web = null;
+        }
+    }
+
+    void setVolume(float v) {
+        volume = v;
+        tv.setStreamVolume(v);
+        if (player != null) {
+            try {
+                player.setVolume(v, v);
+            } catch (IllegalStateException ignored) {
+                // player released
+            }
+        }
+    }
+
+    /** Widgets redraw themselves once a second. */
+    void tick() {
+        if (!Sources.isWidget(id) || panel.getVisibility() != VISIBLE) return;
+        String w = id.substring(Sources.WIDGET.length());
+        boolean h24 = store.bool("clock24", false);
+        long now = System.currentTimeMillis();
+        SpannableStringBuilder sb = new SpannableStringBuilder();
+        if (w.equals("clock")) {
+            String time = new SimpleDateFormat(h24 ? "HH:mm" : "h:mm a", Locale.getDefault()).format(new Date(now));
+            String date = new SimpleDateFormat("EEEE d MMMM", Locale.getDefault()).format(new Date(now));
+            sb.append(time).setSpan(new RelativeSizeSpan(2.6f), 0, time.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            sb.append("\n").append(date);
+        } else if (w.equals("weather")) {
+            WeatherClient.Report r = Shared.weather;
+            if (r == null) {
+                sb.append("Weather isn't set up\nSettings > Weather");
+            } else {
+                String head = r.temp + "°" + (r.fahrenheit ? "F" : "C");
+                sb.append(head).setSpan(new RelativeSizeSpan(2.4f), 0, head.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                sb.append("\n").append(r.place).append("  ·  ").append(WeatherClient.describe(r.code));
+                for (int i = 0; i < Math.min(2, r.days.size()); i++) {
+                    WeatherClient.Day d = r.days.get(i);
+                    sb.append("\n").append(d.label).append("   ").append(String.valueOf(d.hi)).append("° / ")
+                            .append(String.valueOf(d.lo)).append("°");
+                }
+            }
+        } else {
+            List<IcsCalendar.Event> events = Shared.events;
+            SimpleDateFormat time = new SimpleDateFormat(h24 ? "HH:mm" : "h:mm a", Locale.getDefault());
+            SimpleDateFormat day = new SimpleDateFormat("EEE d MMM", Locale.getDefault());
+            sb.append("Coming up");
+            sb.setSpan(new RelativeSizeSpan(1.3f), 0, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            int shown = 0;
+            for (IcsCalendar.Event e : events) {
+                if (e.end < now && !e.allDay) continue;
+                if (shown++ >= 3) break;
+                sb.append("\n").append(day.format(new Date(e.start))).append(e.allDay ? "" : "  " + time.format(new Date(e.start)))
+                        .append("  ").append(e.title.isEmpty() ? "(No title)" : e.title);
+            }
+            if (shown == 0) sb.append("\nNothing coming up, or no calendar set up");
+        }
+        panel.setText(sb);
+    }
+}

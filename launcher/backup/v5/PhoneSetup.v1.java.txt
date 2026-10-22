@@ -1,0 +1,248 @@
+package com.liam.homescreen;
+
+import android.os.Handler;
+import android.os.Looper;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.URLDecoder;
+import java.security.SecureRandom;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * A tiny web page, served only while switched on, so long things (calendar links, playlists) can be
+ * typed on a phone or computer instead of with the remote. Protected by a PIN shown on the TV.
+ */
+final class PhoneSetup {
+    static final int PORT = 8765;
+    private static final long AUTO_OFF_MS = 15 * 60 * 1000L;
+
+    private final Store store;
+    private final Runnable onChanged;
+    private final Handler ui = new Handler(Looper.getMainLooper());
+    private ServerSocket server;
+    private Thread thread;
+    private String pin = "";
+    private int failures;
+    private final Runnable autoOff = new Runnable() {
+        @Override
+        public void run() {
+            stop();
+            onChanged.run();
+        }
+    };
+
+    PhoneSetup(Store store, Runnable onChanged) {
+        this.store = store;
+        this.onChanged = onChanged;
+    }
+
+    boolean running() {
+        return server != null;
+    }
+
+    String pin() {
+        return pin;
+    }
+
+    String address() {
+        try {
+            for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                if (!ni.isUp() || ni.isLoopback()) continue;
+                for (InetAddress a : Collections.list(ni.getInetAddresses())) {
+                    if (a instanceof Inet4Address) return "http://" + a.getHostAddress() + ":" + PORT;
+                }
+            }
+        } catch (IOException ignored) {
+            // fall through
+        }
+        return "http://<this TV>:" + PORT;
+    }
+
+    void start() {
+        if (server != null) return;
+        try {
+            server = new ServerSocket(PORT);
+        } catch (IOException e) {
+            server = null;
+            return;
+        }
+        pin = String.format("%04d", new SecureRandom().nextInt(10000));
+        failures = 0;
+        final ServerSocket s = server;
+        thread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                while (!s.isClosed()) {
+                    try {
+                        handle(s.accept());
+                    } catch (IOException e) {
+                        break;
+                    }
+                }
+            }
+        }, "phone-setup");
+        thread.setDaemon(true);
+        thread.start();
+        ui.removeCallbacks(autoOff);
+        ui.postDelayed(autoOff, AUTO_OFF_MS);
+    }
+
+    void stop() {
+        ui.removeCallbacks(autoOff);
+        if (server != null) {
+            try {
+                server.close();
+            } catch (IOException ignored) {
+                // closing
+            }
+            server = null;
+        }
+    }
+
+    private void handle(Socket sock) {
+        try {
+            sock.setSoTimeout(5000);
+            InputStream in = sock.getInputStream();
+            BufferedReader r = new BufferedReader(new InputStreamReader(in, "UTF-8"));
+            String request = r.readLine();
+            if (request == null) return;
+            int length = 0;
+            String line;
+            while ((line = r.readLine()) != null && !line.isEmpty()) {
+                if (line.toLowerCase().startsWith("content-length:")) length = Integer.parseInt(line.substring(15).trim());
+            }
+            char[] body = new char[Math.min(length, 20000)];
+            int got = 0;
+            while (got < body.length) {
+                int n = r.read(body, got, body.length - got);
+                if (n < 0) break;
+                got += n;
+            }
+            Map<String, String> params = parse(request.contains("?") ? request.substring(request.indexOf('?') + 1,
+                    request.lastIndexOf(' ') > request.indexOf('?') ? request.lastIndexOf(' ') : request.length()) : "");
+            params.putAll(parse(new String(body, 0, got)));
+
+            String html;
+            boolean post = request.startsWith("POST");
+            String given = params.get("pin");
+            if (given == null || !given.equals(pin)) {
+                if (given != null) failures++;
+                html = failures >= 5 ? page("Locked", "<p>Too many wrong PINs. Turn Phone setup off and on again on the TV.</p>")
+                        : pinPage(given != null);
+            } else if (post) {
+                if (params.containsKey("city")) store.put("weather_city", params.get("city").trim());
+                if (params.containsKey("units")) store.put("units", params.get("units").equals("c") ? "c" : "f");
+                if (params.containsKey("calendars")) store.putLines("calendar_urls", split(params.get("calendars")));
+                if (params.containsKey("iptv")) store.putLines("iptv_urls", split(params.get("iptv")));
+                if (params.containsKey("web")) store.putLines("web_sites", split(params.get("web")));
+                ui.post(onChanged);
+                html = page("Saved", "<p>Saved. Your TV will update in a moment.</p><p><a href=\"/?pin=" + pin + "\">Back</a></p>");
+            } else {
+                html = formPage();
+            }
+            byte[] out = html.getBytes("UTF-8");
+            OutputStream os = sock.getOutputStream();
+            os.write(("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: " + out.length
+                    + "\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n").getBytes("UTF-8"));
+            os.write(out);
+            os.flush();
+        } catch (Exception ignored) {
+            // a bad request just closes
+        } finally {
+            try {
+                sock.close();
+            } catch (IOException ignored) {
+                // closed
+            }
+        }
+    }
+
+    private static List<String> split(String s) {
+        List<String> out = new ArrayList<>();
+        for (String x : s.split("[\\r\\n]+")) if (!x.trim().isEmpty()) out.add(x.trim());
+        return out;
+    }
+
+    private static Map<String, String> parse(String q) {
+        Map<String, String> m = new HashMap<>();
+        for (String kv : q.split("&")) {
+            int eq = kv.indexOf('=');
+            if (eq <= 0) continue;
+            try {
+                m.put(URLDecoder.decode(kv.substring(0, eq), "UTF-8"), URLDecoder.decode(kv.substring(eq + 1), "UTF-8"));
+            } catch (Exception ignored) {
+                // skip malformed pair
+            }
+        }
+        return m;
+    }
+
+    private static String esc(String s) {
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
+    }
+
+    private static String hex(int c) {
+        return String.format("#%06x", c & 0xFFFFFF);
+    }
+
+    /** The page wears the same theme as the TV: its gradient, fonts, glass fields. */
+    private static String page(String title, String body) {
+        int[] t = XmbView.currentCorners;
+        boolean dark = XmbView.iconColor == 0xFF000000;
+        String ink = dark ? "#000" : "#fff";
+        String glass = dark ? "rgba(0,0,0,.10)" : "rgba(255,255,255,.18)";
+        String edge = dark ? "rgba(0,0,0,.35)" : "rgba(255,255,255,.45)";
+        return "<!doctype html><html><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\">"
+                + "<title>TV setup</title><style>"
+                + "body{margin:0;min-height:100vh;font:17px Roboto,'Helvetica Neue',Arial,sans-serif;color:" + ink
+                + ";background:linear-gradient(135deg," + hex(XmbView.blend(t[0], t[1], 0.5f)) + "," + hex(XmbView.blend(t[2], t[3], 0.5f)) + ")}"
+                + ".card{max-width:620px;margin:0 auto;padding:28px 18px 40px}"
+                + "h1{font-weight:300;font-size:34px;letter-spacing:.5px;margin:6px 0 22px;text-shadow:0 2px 4px rgba(0,0,0,.35)}"
+                + "label{display:block;margin:20px 0 7px;font-weight:500;text-shadow:0 1px 3px rgba(0,0,0,.35)}"
+                + "input,textarea,select{width:100%;box-sizing:border-box;padding:12px 14px;border-radius:12px;border:1.5px solid " + edge
+                + ";background:" + glass + ";color:" + ink + ";font:inherit;backdrop-filter:blur(8px)}"
+                + "textarea{min-height:110px}"
+                + "button{margin-top:26px;padding:13px 28px;border:1.5px solid " + edge + ";border-radius:999px;background:" + glass
+                + ";color:" + ink + ";font:inherit;font-weight:500;backdrop-filter:blur(8px)}"
+                + "small{opacity:.8;font-weight:400}a{color:" + ink + "}"
+                + "</style></head><body><div class=card><h1>" + esc(title) + "</h1>" + body + "</div></body></html>";
+    }
+
+    private String pinPage(boolean wrong) {
+        return page("TV setup", (wrong ? "<p>Wrong PIN.</p>" : "") + "<form><label>PIN shown on your TV</label>"
+                + "<input name=pin inputmode=numeric autofocus><button>Continue</button></form>");
+    }
+
+    private String formPage() {
+        StringBuilder cal = new StringBuilder();
+        for (String s : store.calendarUrls()) cal.append(esc(s)).append('\n');
+        StringBuilder tv = new StringBuilder();
+        for (String s : store.iptvUrls()) tv.append(esc(s)).append('\n');
+        StringBuilder web = new StringBuilder();
+        for (String s : store.lines("web_sites")) web.append(esc(s)).append('\n');
+        boolean f = store.fahrenheit();
+        return page("TV setup", "<form method=post><input type=hidden name=pin value=\"" + pin + "\">"
+                + "<label>Weather city (e.g. Seattle, WA)</label><input name=city value=\"" + esc(store.weatherCity()) + "\">"
+                + "<label>Temperature</label><select name=units><option value=f" + (f ? " selected" : "") + ">Fahrenheit</option>"
+                + "<option value=c" + (f ? "" : " selected") + ">Celsius</option></select>"
+                + "<label>Calendar links, one per line <small>(Apple Calendar: Share Calendar &gt; Public Calendar)</small></label>"
+                + "<textarea name=calendars>" + cal + "</textarea>"
+                + "<label>IPTV playlist links (M3U), one per line</label><textarea name=iptv>" + tv + "</textarea>"
+                + "<label>Web pages for Multiview, one per line <small>(an address, or Name|address)</small></label>"
+                + "<textarea name=web>" + web + "</textarea>"
+                + "<button>Save to TV</button></form>");
+    }
+}

@@ -1,0 +1,670 @@
+package com.liam.homescreen;
+
+import android.app.Activity;
+import android.content.ComponentName;
+import android.content.Context;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.Path;
+import android.graphics.RectF;
+import android.graphics.Typeface;
+import android.graphics.drawable.Drawable;
+import android.graphics.drawable.GradientDrawable;
+import android.media.tv.TvContract;
+import android.media.tv.TvInputInfo;
+import android.media.tv.TvInputManager;
+import android.media.tv.TvView;
+import android.net.Uri;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.provider.Settings;
+import android.util.DisplayMetrics;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
+import android.widget.TextClock;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
+
+/** A minimal, Apple TV style home screen: one row of large app tiles over a dark backdrop. */
+public class LauncherActivity extends Activity {
+    // Shown first, in this order. Everything else follows alphabetically, Settings last.
+    private static final String[] PINNED = {
+            "com.google.android.youtube.tv",
+            "com.netflix.ninja",
+            "com.amazon.amazonvideo.livingroom",
+            "com.disney.disneyplus",
+            "com.apple.atve.androidtv.appletv",
+            "com.plexapp.android",
+            "com.vt.tv.tvcenter",
+    };
+    private static final String SETTINGS = "com.android.tv.settings";
+    // Hisense system apps hidden from the row (prefix match), except the ones allowed below.
+    private static final String HIDDEN_PREFIX = "com.vt.";
+    private static final String[] ALLOWED_VT = {"com.vt.tv.tvcenter"};
+
+    // Sizes are derived from the screen width so the layout holds on any TV density.
+    private int tileW, tileH, gap, radius;
+
+    private HorizontalScrollView scroller;
+    private LinearLayout row;
+    private TextView label;
+    private float density;
+    private LinearLayout inputsRow;
+    private TextView cornerPill;
+    private TvView preview;
+    private boolean previewing;
+    private int cornerId = View.NO_ID;
+    private SharedPreferences prefs;
+    // Live TvView preview of the pinned input. Optional auto-close timer (disabled).
+    private static final long PREVIEW_TIMEOUT_MS = 0; // 0 = stay open until closed
+    private final Handler ui = new Handler(Looper.getMainLooper());
+    private final Runnable closePreview = new Runnable() {
+        @Override
+        public void run() {
+            if (previewing) hidePreview();
+        }
+    };
+    private static final boolean PREVIEW_ENABLED = true;
+    private static final String PREF_CORNER = "corner_input";
+    private static final String DEFAULT_CORNER_NAME = "Apple TV"; // pinned on first run if such an input exists
+    private int quickFirstId = View.NO_ID;
+    private int inputFirstId = View.NO_ID;
+    private TvInputManager tvInputs;
+    private final TvInputManager.TvInputCallback inputCallback = new TvInputManager.TvInputCallback() {
+        @Override
+        public void onInputStateChanged(String inputId, int state) {
+            refreshInputs();
+        }
+
+        @Override
+        public void onInputAdded(String inputId) {
+            refreshInputs();
+        }
+
+        @Override
+        public void onInputRemoved(String inputId) {
+            refreshInputs();
+        }
+    };
+
+    @Override
+    protected void onCreate(Bundle state) {
+        super.onCreate(state);
+        DisplayMetrics dm = getResources().getDisplayMetrics();
+        density = dm.density;
+        prefs = getSharedPreferences("home", MODE_PRIVATE);
+        tileW = Math.round(dm.widthPixels * 0.215f);
+        tileH = Math.round(tileW * 9f / 16f);
+        gap = Math.round(dm.widthPixels * 0.018f);
+        radius = Math.round(dm.widthPixels * 0.009f);
+        setContentView(buildUi());
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        tvInputs = (TvInputManager) getSystemService(Context.TV_INPUT_SERVICE);
+        if (tvInputs != null) tvInputs.registerCallback(inputCallback, new Handler(Looper.getMainLooper()));
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        if (previewing) hidePreview();
+        if (tvInputs != null) tvInputs.unregisterCallback(inputCallback);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        reload();
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        // Home pressed while already on the home screen: go back to the first tile.
+        if (row.getChildCount() > 0) {
+            scroller.smoothScrollTo(0, 0);
+            row.getChildAt(0).requestFocus();
+        }
+    }
+
+    @Override
+    public void onBackPressed() {
+        // This is the home screen; Back only closes the input preview.
+        if (OverlayPreview.isShowing()) OverlayPreview.hide();
+        else if (previewing) hidePreview();
+    }
+
+    // ---------------------------------------------------------------- UI
+
+    private View buildUi() {
+        DisplayMetrics dm = getResources().getDisplayMetrics();
+
+        FrameLayout root = new FrameLayout(this);
+        root.setClipChildren(false);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setGradientType(GradientDrawable.RADIAL_GRADIENT);
+        bg.setGradientCenter(0.5f, 0.3f);
+        bg.setGradientRadius(dm.widthPixels * 0.95f);
+        bg.setColors(new int[]{0xFF22263A, 0xFF0B0C12, 0xFF050508});
+        root.setBackground(bg);
+
+        // Clock, top left
+        LinearLayout clockBox = new LinearLayout(this);
+        clockBox.setOrientation(LinearLayout.VERTICAL);
+        FrameLayout.LayoutParams clockLp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        clockLp.setMargins(dp(40), dp(28), 0, 0);
+        TextClock time = clock("h:mm", "H:mm", 34, 0xF2FFFFFF, Typeface.create("sans-serif-light", Typeface.NORMAL));
+        TextClock date = clock("EEEE, d MMMM", "EEEE, d MMMM", 13, 0x99FFFFFF, Typeface.create("sans-serif", Typeface.NORMAL));
+        clockBox.addView(time);
+        clockBox.addView(date);
+        root.addView(clockBox, clockLp);
+
+        // Quick settings, top right (reach with Up from the app row)
+        LinearLayout quick = new LinearLayout(this);
+        quick.setOrientation(LinearLayout.HORIZONTAL);
+        quick.setClipChildren(false);
+        quick.setClipToPadding(false);
+        quick.setPadding(dp(8), dp(8), dp(8), dp(8));
+        FrameLayout.LayoutParams quickLp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.END);
+        quickLp.setMargins(0, dp(26), dp(32), 0);
+        String[][] shortcuts = {
+                {"Multiview", "multiview"},
+                {"Picture", Settings.ACTION_DISPLAY_SETTINGS},
+                {"Sound", "android.settings.SOUND_SETTINGS"},
+                {"Network", Settings.ACTION_WIFI_SETTINGS},
+                {"Settings", Settings.ACTION_SETTINGS},
+        };
+        for (int i = 0; i < shortcuts.length; i++) {
+            final String action = shortcuts[i][1];
+            TextView pill = pill(shortcuts[i][0], new Runnable() {
+                @Override
+                public void run() {
+                    if (action.equals("multiview")) startActivity(new Intent(LauncherActivity.this, MultiviewActivity.class));
+                    else startActivity(new Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                }
+            });
+            if (i == 0) {
+                quickFirstId = View.generateViewId();
+                pill.setId(quickFirstId);
+            }
+            quick.addView(pill, pillLp(i == shortcuts.length - 1));
+        }
+        root.addView(quick, quickLp);
+
+        // App row + label, vertically centred
+        LinearLayout column = new LinearLayout(this);
+        column.setOrientation(LinearLayout.VERTICAL);
+        column.setGravity(Gravity.CENTER_HORIZONTAL);
+        column.setClipChildren(false);
+        column.setClipToPadding(false);
+        FrameLayout.LayoutParams colLp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER_VERTICAL);
+        colLp.topMargin = dp(24);
+
+        scroller = new HorizontalScrollView(this);
+        scroller.setHorizontalScrollBarEnabled(false);
+        scroller.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        scroller.setFocusable(false);
+        scroller.setClipToPadding(false);
+        scroller.setClipChildren(false);
+        row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setClipToPadding(false);
+        row.setClipChildren(false);
+        // Padding gives the focused (scaled) tile room, and lets the first/last tile centre.
+        int side = dm.widthPixels / 2 - tileW / 2;
+        row.setPadding(side, dp(20), side, dp(20));
+        scroller.addView(row, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        column.addView(scroller, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        label = new TextView(this);
+        label.setTextColor(0xF2FFFFFF);
+        label.setTextSize(20);
+        label.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        label.setGravity(Gravity.CENTER);
+        label.setAlpha(0f);
+        column.addView(label, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(30)));
+
+        // Inputs, under the label (reach with Down from the app row)
+        inputsRow = new LinearLayout(this);
+        inputsRow.setOrientation(LinearLayout.HORIZONTAL);
+        inputsRow.setGravity(Gravity.CENTER);
+        inputsRow.setClipChildren(false);
+        inputsRow.setClipToPadding(false);
+        inputsRow.setPadding(dp(8), dp(8), dp(8), dp(8));
+        LinearLayout.LayoutParams inLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        inLp.topMargin = dp(18);
+        column.addView(inputsRow, inLp);
+
+        root.addView(column, colLp);
+
+        // Pinned input shortcut, bottom left. Long-press any input to pin it here; long-press this to unpin.
+        cornerPill = pill("", new Runnable() {
+            @Override
+            public void run() {
+                String id = prefs.getString(PREF_CORNER, null);
+                if (id == null || id.isEmpty()) return;
+                if (!PREVIEW_ENABLED) switchInput(id);
+                else if (OverlayPreview.canUse(LauncherActivity.this)) { // floating window, stays over other apps
+                    if (OverlayPreview.isShowing()) OverlayPreview.hide();
+                    else OverlayPreview.show(LauncherActivity.this, id, dp(40), dp(34) + dp(46));
+                } else if (previewing) hidePreview();
+                else showPreview(id);
+            }
+        });
+        cornerId = View.generateViewId();
+        cornerPill.setId(cornerId);
+        cornerPill.setVisibility(View.GONE);
+        cornerPill.setOnLongClickListener(new View.OnLongClickListener() {
+            @Override
+            public boolean onLongClick(View v) {
+                prefs.edit().putString(PREF_CORNER, "").apply();
+                Toast.makeText(LauncherActivity.this, "Unpinned", Toast.LENGTH_SHORT).show();
+                refreshInputs();
+                if (inputFirstId != View.NO_ID) findViewById(inputFirstId).requestFocus();
+                return true;
+            }
+        });
+        FrameLayout.LayoutParams cornerLp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.START);
+        cornerLp.setMargins(dp(40), 0, 0, dp(34));
+        root.addView(cornerPill, cornerLp);
+
+        // Live preview of the pinned input, above the corner button
+        preview = new TvView(this);
+        preview.setZOrderOnTop(true); // draw the video above the launcher, only inside its own rectangle
+        preview.setVisibility(View.GONE);
+        preview.setCallback(new TvView.TvInputCallback() {
+            @Override
+            public void onConnectionFailed(String inputId) {
+                Toast.makeText(LauncherActivity.this, "Can't preview this input", Toast.LENGTH_LONG).show();
+                hidePreview();
+            }
+
+            @Override
+            public void onVideoUnavailable(String inputId, int reason) {
+                android.util.Log.i("HomePreview", "video unavailable " + inputId + " reason=" + reason);
+            }
+
+            @Override
+            public void onVideoAvailable(String inputId) {
+                android.util.Log.i("HomePreview", "video available " + inputId);
+            }
+        });
+        int pw = Math.round(dm.widthPixels * 0.27f);
+        FrameLayout.LayoutParams pvLp = new FrameLayout.LayoutParams(pw, Math.round(pw * 9f / 16f),
+                Gravity.BOTTOM | Gravity.START);
+        pvLp.setMargins(dp(40), 0, 0, dp(34) + dp(46));
+        root.addView(preview, pvLp);
+        return root;
+    }
+
+    private void showPreview(String inputId) {
+        previewing = true;
+        preview.setVisibility(View.VISIBLE);
+        preview.setStreamVolume(0f); // silent preview
+        preview.tune(inputId, TvContract.buildChannelUriForPassthroughInput(inputId));
+        ui.removeCallbacks(closePreview);
+        if (PREVIEW_TIMEOUT_MS > 0) ui.postDelayed(closePreview, PREVIEW_TIMEOUT_MS);
+    }
+
+    private void hidePreview() {
+        ui.removeCallbacks(closePreview);
+        previewing = false;
+        preview.reset();
+        preview.setVisibility(View.GONE);
+    }
+
+    private void switchInput(String inputId) {
+        startActivity(new Intent(Intent.ACTION_VIEW, TvContract.buildChannelUriForPassthroughInput(inputId))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+    }
+
+    private LinearLayout.LayoutParams pillLp(boolean last) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.rightMargin = last ? 0 : dp(10);
+        return lp;
+    }
+
+    /** A small rounded text button: translucent when idle, solid white when focused. */
+    private TextView pill(String text, final Runnable action) {
+        final TextView t = new TextView(this);
+        t.setText(text);
+        t.setTextSize(13);
+        t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        t.setPadding(dp(14), dp(7), dp(14), dp(7));
+        t.setFocusable(true);
+        t.setClickable(true);
+        t.setDefaultFocusHighlightEnabled(false);
+        applyPill(t, false);
+        t.setOnFocusChangeListener(new View.OnFocusChangeListener() {
+            @Override
+            public void onFocusChange(View v, boolean has) {
+                applyPill(t, has);
+                v.animate().scaleX(has ? 1.08f : 1f).scaleY(has ? 1.08f : 1f).setDuration(150).start();
+            }
+        });
+        t.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                action.run();
+            }
+        });
+        return t;
+    }
+
+    private void applyPill(TextView t, boolean focused) {
+        GradientDrawable bg = new GradientDrawable();
+        bg.setCornerRadius(dp(40));
+        bg.setColor(focused ? 0xF2FFFFFF : 0x26FFFFFF);
+        t.setBackground(bg);
+        t.setTextColor(focused ? 0xFF111218 : 0xCCFFFFFF);
+    }
+
+    // ---------------------------------------------------------------- Inputs
+
+    private void refreshInputs() {
+        if (inputsRow == null) return;
+        inputsRow.removeAllViews();
+        inputFirstId = View.NO_ID;
+        if (tvInputs == null) return;
+        List<TvInputInfo> inputs = new ArrayList<>();
+        for (TvInputInfo info : tvInputs.getTvInputList()) {
+            if (!info.isPassthroughInput()) continue; // skip tuner / channel based inputs
+            if (tvInputs.getInputState(info.getId()) == TvInputManager.INPUT_STATE_DISCONNECTED) continue;
+            inputs.add(info);
+        }
+        Collections.sort(inputs, new Comparator<TvInputInfo>() {
+            @Override
+            public int compare(TvInputInfo a, TvInputInfo b) {
+                return inputName(a).compareToIgnoreCase(inputName(b));
+            }
+        });
+        for (int i = 0; i < inputs.size(); i++) {
+            final TvInputInfo info = inputs.get(i);
+            TextView pill = pill(inputName(info), new Runnable() {
+                @Override
+                public void run() {
+                    switchInput(info.getId());
+                }
+            });
+            pill.setOnLongClickListener(new View.OnLongClickListener() {
+                @Override
+                public boolean onLongClick(View v) {
+                    prefs.edit().putString(PREF_CORNER, info.getId()).apply();
+                    Toast.makeText(LauncherActivity.this, inputName(info) + " pinned to the corner", Toast.LENGTH_SHORT).show();
+                    updateCorner(inputs);
+                    return true;
+                }
+            });
+            if (i == 0) {
+                inputFirstId = View.generateViewId();
+                pill.setId(inputFirstId);
+            }
+            inputsRow.addView(pill, pillLp(i == inputs.size() - 1));
+        }
+        updateCorner(inputs);
+        linkTileFocus();
+    }
+
+    /** Shows the pinned input (defaulting to the Apple TV input on first run) in the bottom-left corner. */
+    private void updateCorner(List<TvInputInfo> inputs) {
+        String id = prefs.getString(PREF_CORNER, null);
+        if (id == null) { // first run: pin a matching input if there is one
+            for (TvInputInfo info : inputs) {
+                if (inputName(info).equalsIgnoreCase(DEFAULT_CORNER_NAME)) {
+                    id = info.getId();
+                    prefs.edit().putString(PREF_CORNER, id).apply();
+                }
+            }
+        }
+        TvInputInfo pinned = id == null || id.isEmpty() ? null : tvInputs.getTvInputInfo(id);
+        if (pinned == null && id != null && !id.isEmpty()) { // saved input no longer exists: fall back to Apple TV
+            for (TvInputInfo info : inputs) {
+                if (inputName(info).equalsIgnoreCase(DEFAULT_CORNER_NAME)) {
+                    pinned = info;
+                    prefs.edit().putString(PREF_CORNER, info.getId()).apply();
+                }
+            }
+        }
+        if (pinned == null) {
+            cornerPill.setVisibility(View.GONE);
+            return;
+        }
+        cornerPill.setText(inputName(pinned));
+        cornerPill.setVisibility(View.VISIBLE);
+        // Down from the inputs row reaches the corner button, Up returns to it.
+        for (int i = 0; i < inputsRow.getChildCount(); i++) inputsRow.getChildAt(i).setNextFocusDownId(cornerId);
+        cornerPill.setNextFocusUpId(inputFirstId);
+    }
+
+    private String inputName(TvInputInfo info) {
+        if (info.getId().endsWith(MultiviewActivity.APPLE_TV_SUFFIX)) return "Apple TV";
+        CharSequence custom = info.loadCustomLabel(this);
+        CharSequence name = custom != null && custom.length() > 0 ? custom : info.loadLabel(this);
+        return String.valueOf(name);
+    }
+
+    /** Up from a tile goes to the quick strip, Down to the inputs, wherever they sit on screen. */
+    private void linkTileFocus() {
+        for (int i = 0; i < row.getChildCount(); i++) {
+            View t = row.getChildAt(i);
+            t.setNextFocusUpId(quickFirstId);
+            t.setNextFocusDownId(inputFirstId == View.NO_ID ? t.getId() : inputFirstId);
+        }
+    }
+
+    private TextClock clock(String f12, String f24, int sp, int color, Typeface face) {
+        TextClock c = new TextClock(this);
+        c.setFormat12Hour(f12);
+        c.setFormat24Hour(f24);
+        c.setTextSize(sp);
+        c.setTextColor(color);
+        c.setTypeface(face);
+        return c;
+    }
+
+    // ---------------------------------------------------------------- Apps
+
+    private static class App {
+        final String pkg;
+        final String name;
+        final ComponentName component;
+        final Drawable image;
+        final boolean banner;
+
+        App(String pkg, String name, ComponentName component, Drawable image, boolean banner) {
+            this.pkg = pkg;
+            this.name = name;
+            this.component = component;
+            this.image = image;
+            this.banner = banner;
+        }
+    }
+
+    private List<App> loadApps() {
+        PackageManager pm = getPackageManager();
+        Intent query = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER);
+        List<App> apps = new ArrayList<>();
+        List<String> seen = new ArrayList<>();
+        for (ResolveInfo ri : pm.queryIntentActivities(query, 0)) {
+            String pkg = ri.activityInfo.packageName;
+            if (pkg.equals(getPackageName()) || seen.contains(pkg) || isHidden(pkg)) continue;
+            seen.add(pkg);
+            Drawable image = ri.activityInfo.loadBanner(pm);
+            boolean banner = image != null;
+            if (image == null) image = ri.loadIcon(pm);
+            apps.add(new App(pkg, String.valueOf(ri.loadLabel(pm)),
+                    new ComponentName(pkg, ri.activityInfo.name), image, banner));
+        }
+        Collections.sort(apps, new Comparator<App>() {
+            @Override
+            public int compare(App a, App b) {
+                int ra = rank(a.pkg);
+                int rb = rank(b.pkg);
+                if (ra != rb) return ra - rb;
+                return a.name.compareToIgnoreCase(b.name);
+            }
+        });
+        return apps;
+    }
+
+    private static boolean isHidden(String pkg) {
+        if (!pkg.startsWith(HIDDEN_PREFIX)) return false;
+        for (String ok : ALLOWED_VT) if (ok.equals(pkg)) return false;
+        return true;
+    }
+
+    private static int rank(String pkg) {
+        if (pkg.equals(SETTINGS)) return 10000;
+        for (int i = 0; i < PINNED.length; i++) if (PINNED[i].equals(pkg)) return i;
+        return 1000;
+    }
+
+    private void reload() {
+        int focused = -1;
+        for (int i = 0; i < row.getChildCount(); i++) if (row.getChildAt(i).hasFocus()) focused = i;
+        row.removeAllViews();
+        List<App> apps = loadApps();
+        for (int i = 0; i < apps.size(); i++) row.addView(tile(apps.get(i), i == apps.size() - 1));
+        refreshInputs();
+        if (row.getChildCount() > 0) row.getChildAt(Math.max(0, Math.min(focused, row.getChildCount() - 1))).requestFocus();
+    }
+
+    // ---------------------------------------------------------------- Tiles
+
+    /** Rounded tile that does its own clipping and focus ring (view-outline clipping misbehaves when scaled on some TVs). */
+    private static class Tile extends FrameLayout {
+        private final Path clip = new Path();
+        private final RectF rect = new RectF();
+        private final Paint ringPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final float radius;
+        private boolean ring;
+
+        Tile(Context c, float radius, float stroke) {
+            super(c);
+            this.radius = radius;
+            ringPaint.setStyle(Paint.Style.STROKE);
+            ringPaint.setStrokeWidth(stroke);
+            ringPaint.setColor(0xE6FFFFFF);
+            setWillNotDraw(false);
+        }
+
+        void setRing(boolean on) {
+            ring = on;
+            invalidate();
+        }
+
+        @Override
+        protected void onSizeChanged(int w, int h, int ow, int oh) {
+            super.onSizeChanged(w, h, ow, oh);
+            rect.set(0, 0, w, h);
+            clip.reset();
+            clip.addRoundRect(rect, radius, radius, Path.Direction.CW);
+        }
+
+        @Override
+        public void draw(Canvas canvas) {
+            int save = canvas.save();
+            canvas.clipPath(clip);
+            canvas.drawColor(0xFF23242B);
+            super.draw(canvas);
+            canvas.restoreToCount(save);
+            if (ring) {
+                float half = ringPaint.getStrokeWidth() / 2f;
+                rect.set(half, half, getWidth() - half, getHeight() - half);
+                canvas.drawRoundRect(rect, radius, radius, ringPaint);
+            }
+        }
+    }
+
+    private View tile(final App app, boolean last) {
+        final Tile t = new Tile(this, radius, dp(2));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(tileW, tileH);
+        lp.rightMargin = last ? 0 : gap;
+        t.setLayoutParams(lp);
+        t.setFocusable(true);
+        t.setDefaultFocusHighlightEnabled(false);
+        t.setClickable(true);
+
+        ImageView img = new ImageView(this);
+        img.setImageDrawable(app.image);
+        if (app.banner) {
+            img.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            t.addView(img, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        } else {
+            img.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            t.addView(img, new FrameLayout.LayoutParams(tileH / 2, tileH / 2, Gravity.CENTER));
+        }
+
+        t.setOnFocusChangeListener(new View.OnFocusChangeListener() {
+            @Override
+            public void onFocusChange(View v, boolean has) {
+                t.setRing(has);
+                // The gap between tiles is wider than the scale-up, so focused tiles never overlap.
+                v.animate().scaleX(has ? 1.12f : 1f).scaleY(has ? 1.12f : 1f).setDuration(180).start();
+                if (has) {
+                    scroller.smoothScrollTo(v.getLeft() + v.getWidth() / 2 - scroller.getWidth() / 2, 0);
+                    label.setText(app.name);
+                    label.animate().cancel();
+                    label.setAlpha(0f);
+                    label.animate().alpha(1f).setDuration(200).start();
+                }
+            }
+        });
+        t.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                launch(app);
+            }
+        });
+        // Long-press: open the app's info page (uninstall / disable / permissions).
+        t.setOnLongClickListener(new View.OnLongClickListener() {
+            @Override
+            public boolean onLongClick(View v) {
+                startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.fromParts("package", app.pkg, null)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                return true;
+            }
+        });
+        return t;
+    }
+
+    private void launch(App app) {
+        Intent i = new Intent(Intent.ACTION_MAIN)
+                .addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER)
+                .setComponent(app.component)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
+        startActivity(i);
+    }
+
+    private int dp(int v) {
+        return Math.round(v * density);
+    }
+}

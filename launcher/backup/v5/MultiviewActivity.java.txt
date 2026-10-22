@@ -1,0 +1,718 @@
+package com.liam.homescreen;
+
+import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.Context;
+import android.content.DialogInterface;
+import android.graphics.Typeface;
+import android.media.MediaPlayer;
+import android.media.tv.TvContract;
+import android.media.tv.TvInputInfo;
+import android.media.tv.TvInputManager;
+import android.media.tv.TvView;
+import android.net.Uri;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.SystemClock;
+import android.text.InputType;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
+import android.text.style.RelativeSizeSpan;
+import android.util.DisplayMetrics;
+import android.util.Log;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.WindowManager;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
+import android.widget.EditText;
+import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+import android.widget.VideoView;
+
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Date;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+
+/**
+ * A 2x2 wall. Each quadrant can show a live HDMI input, a web page, an IPTV channel, or a widget
+ * (clock, weather, calendar). OK once: hear that quadrant (or, on a web page, use it with the remote).
+ * OK twice, or hold OK: choose what it shows. Choices are remembered. Back leaves.
+ */
+public class MultiviewActivity extends Activity {
+    private static final String TAG = "Multiview";
+    private static final int CELLS = 4;
+    /** The port the Apple TV is on, used for the default layout. */
+    static final String APPLE_TV_SUFFIX = "/HW3";
+    private static final long DOUBLE_CLICK_MS = 450;
+
+    private static final String WEB = "web:";
+    private static final String IPTV = "iptv:";
+    private static final String WIDGET = "widget:";
+    private static final String[][] BUILT_IN_SITES = {
+            {"YouTube", "https://www.youtube.com/tv"},
+            {"Twitch", "https://www.twitch.tv"},
+    };
+    private static final String[] WIDGETS = {"clock", "weather", "calendar"};
+    private static final String[] WIDGET_NAMES = {"Clock", "Weather", "Calendar"};
+    private static final String TV_UA = "Mozilla/5.0 (SMART-TV; LINUX; Tizen 6.0) AppleWebKit/537.36 "
+            + "(KHTML, like Gecko) 76.0.3809.146/6.0 TV Safari/537.36";
+
+    private final TvView[] tvs = new TvView[CELLS];
+    private final TextView[] panels = new TextView[CELLS];
+    private final TextView[] labels = new TextView[CELLS];
+    private final FrameLayout[] holders = new FrameLayout[CELLS];
+    private final LinearLayout[] cells = new LinearLayout[CELLS];
+    private final WebView[] webs = new WebView[CELLS];
+    private final VideoView[] videos = new VideoView[CELLS];
+    private final MediaPlayer[] players = new MediaPlayer[CELLS];
+    private final String[] ids = new String[CELLS];
+    private final List<TvInputInfo> inputs = new ArrayList<>();
+    private final Handler ui = new Handler(Looper.getMainLooper());
+    private Store store;
+    private TvInputManager tim;
+    private int listening = -1;
+    private int webActive = -1;
+    private int lastClickCell = -1;
+    private long lastClickAt;
+
+    private final Runnable tick = new Runnable() {
+        @Override
+        public void run() {
+            for (int i = 0; i < CELLS; i++) if (isWidget(ids[i])) renderWidget(i);
+            ui.postDelayed(this, 1000);
+        }
+    };
+
+    @Override
+    protected void onCreate(Bundle state) {
+        super.onCreate(state);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        store = new Store(this);
+        DisplayMetrics dm = getResources().getDisplayMetrics();
+        final float d = dm.density;
+
+        tim = (TvInputManager) getSystemService(Context.TV_INPUT_SERVICE);
+        for (TvInputInfo info : tim.getTvInputList()) {
+            // Physical inputs only. The AirPlay input blanked the TV when shown in a quadrant.
+            if (!info.isPassthroughInput()) continue;
+            if (tim.getInputState(info.getId()) == TvInputManager.INPUT_STATE_DISCONNECTED) continue;
+            inputs.add(info);
+        }
+        final Context ctx = this;
+        Collections.sort(inputs, new Comparator<TvInputInfo>() {
+            @Override
+            public int compare(TvInputInfo a, TvInputInfo b) {
+                return inputName(ctx, a).compareToIgnoreCase(inputName(ctx, b));
+            }
+        });
+
+        LinearLayout grid = new LinearLayout(this);
+        grid.setOrientation(LinearLayout.VERTICAL);
+        grid.setGravity(Gravity.CENTER);
+        grid.setBackgroundColor(0xFF050508);
+
+        // The wall fills the whole screen: two equal rows, two equal cells per row, a thin label strip in each.
+        final int strip = Math.max(Math.round(dm.heightPixels * 0.03f), Math.round(18 * d));
+        LinearLayout row = null;
+        for (int i = 0; i < CELLS; i++) {
+            if (i % 2 == 0) {
+                row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                row.setGravity(Gravity.CENTER);
+                grid.addView(row, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+            }
+            final int idx = i;
+            ids[i] = store.has("mvx" + i) ? emptyToNull(store.get("mvx" + i, "")) : defaultFor(i);
+            if (ids[i] != null && !known(ids[i])) ids[i] = null;
+
+            LinearLayout cell = new LinearLayout(this);
+            cell.setOrientation(LinearLayout.VERTICAL);
+            cell.setGravity(Gravity.CENTER_HORIZONTAL);
+            cell.setFocusable(true);
+            cell.setClickable(true);
+            cell.setDefaultFocusHighlightEnabled(false);
+            cell.setPadding(1, 1, 1, 1); // a hairline between quadrants
+
+            TvView tv = new TvView(this);
+            tv.setZOrderOnTop(true);
+            tv.setStreamVolume(0f);
+            tv.setCallback(new TvView.TvInputCallback() {
+                @Override
+                public void onConnectionFailed(String inputId) {
+                    Log.i(TAG, "q" + idx + " CONNECTION FAILED");
+                    setStatus(idx, "failed to start");
+                }
+
+                @Override
+                public void onVideoAvailable(String inputId) {
+                    Log.i(TAG, "q" + idx + " VIDEO AVAILABLE");
+                    setStatus(idx, idx == listening ? "live, sound on" : "live");
+                }
+
+                @Override
+                public void onVideoUnavailable(String inputId, int reason) {
+                    Log.i(TAG, "q" + idx + " video unavailable reason=" + reason);
+                    setStatus(idx, reason == TvInputManager.VIDEO_UNAVAILABLE_REASON_WEAK_SIGNAL
+                            ? "no signal" : "starting...");
+                }
+            });
+            TextView panel = new TextView(this);
+            panel.setGravity(Gravity.CENTER);
+            panel.setTextColor(0xE6FFFFFF);
+            panel.setTextSize(30);
+            panel.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
+            panel.setBackgroundColor(0xFF14161C);
+            panel.setPadding(Math.round(24 * d), Math.round(12 * d), Math.round(24 * d), Math.round(12 * d));
+            FrameLayout holder = new FrameLayout(this);
+            holder.addView(tv, new FrameLayout.LayoutParams(-1, -1));
+            holder.addView(panel, new FrameLayout.LayoutParams(-1, -1));
+            cell.addView(holder, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+            tvs[i] = tv;
+            panels[i] = panel;
+            holders[i] = holder;
+            cells[i] = cell;
+
+            TextView label = new TextView(this);
+            label.setTextSize(11);
+            label.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            label.setTextColor(0xCCFFFFFF);
+            label.setGravity(Gravity.CENTER_VERTICAL);
+            label.setSingleLine(true);
+            label.setPadding(Math.round(8 * d), 0, Math.round(8 * d), 0);
+            label.setBackgroundColor(0xFF0A0A0E);
+            cell.addView(label, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, strip));
+            labels[i] = label;
+
+            cell.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    if (isWeb(ids[idx])) {
+                        enterWeb(idx);
+                        return;
+                    }
+                    long now = SystemClock.uptimeMillis();
+                    if (lastClickCell == idx && now - lastClickAt < DOUBLE_CLICK_MS) {
+                        lastClickCell = -1;
+                        chooseType(idx);
+                    } else {
+                        lastClickCell = idx;
+                        lastClickAt = now;
+                        listen(idx);
+                    }
+                }
+            });
+            cell.setOnLongClickListener(new View.OnLongClickListener() {
+                @Override
+                public boolean onLongClick(View v) {
+                    chooseType(idx);
+                    return true;
+                }
+            });
+            cell.setOnFocusChangeListener(new View.OnFocusChangeListener() {
+                @Override
+                public void onFocusChange(View v, boolean has) {
+                    v.setBackgroundColor(has ? 0x40FFFFFF : 0);
+                }
+            });
+            setStatus(i, ids[i] == null ? "empty" : "starting...");
+            row.addView(cell, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f));
+        }
+        setContentView(grid);
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        // Start quadrants one after another so a failure points at the quadrant that hit the limit.
+        for (int i = 0; i < CELLS; i++) {
+            final int idx = i;
+            cells[i].postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    tuneCell(idx);
+                }
+            }, 600L * i);
+        }
+        cells[0].requestFocus();
+        ui.postDelayed(tick, 1000);
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        ui.removeCallbacks(tick);
+        for (int i = 0; i < CELLS; i++) {
+            tvs[i].reset();
+            if (videos[i] != null) videos[i].stopPlayback();
+        }
+        finish();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        for (int i = 0; i < CELLS; i++) {
+            if (webs[i] != null) {
+                webs[i].destroy();
+                webs[i] = null;
+            }
+        }
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (webActive >= 0) leaveWeb();
+        else super.onBackPressed();
+    }
+
+    // ---------------------------------------------------------------- Sources
+
+    private static boolean isWeb(String id) {
+        return id != null && id.startsWith(WEB);
+    }
+
+    private static boolean isIptv(String id) {
+        return id != null && id.startsWith(IPTV);
+    }
+
+    private static boolean isWidget(String id) {
+        return id != null && id.startsWith(WIDGET);
+    }
+
+    /** Built-in sites plus the pages saved in Settings (a line is an address, or Name|address). */
+    private List<String[]> sites() {
+        List<String[]> all = new ArrayList<>();
+        for (String[] s : BUILT_IN_SITES) all.add(s);
+        for (String line : store.lines("web_sites")) {
+            String name;
+            String url;
+            int bar = line.indexOf('|');
+            if (bar > 0) {
+                name = line.substring(0, bar).trim();
+                url = line.substring(bar + 1).trim();
+            } else {
+                url = line;
+                name = line.replaceFirst("^(https?://)?(www\\.)?", "").replaceFirst("[/?#].*$", "");
+            }
+            if (!url.matches("^[a-zA-Z][a-zA-Z0-9+.-]*://.*")) url = "https://" + url;
+            all.add(new String[]{name, url});
+        }
+        return all;
+    }
+
+    private String siteUrl(String id) {
+        for (String[] s : sites()) if ((WEB + s[0]).equals(id)) return s[1];
+        return null;
+    }
+
+    private boolean known(String id) {
+        if (isWeb(id)) return siteUrl(id) != null;
+        if (isIptv(id) || isWidget(id)) return true;
+        for (TvInputInfo info : inputs) if (info.getId().equals(id)) return true;
+        return false;
+    }
+
+    private String defaultFor(int i) {
+        if (i == 0) {
+            for (TvInputInfo info : inputs) if (info.getId().endsWith(APPLE_TV_SUFFIX)) return info.getId();
+            return inputs.isEmpty() ? null : inputs.get(0).getId();
+        }
+        if (i == 1) return WEB + "YouTube";
+        if (i == 2) return WIDGET + "clock";
+        return WIDGET + "weather";
+    }
+
+    private String nameOf(String id) {
+        if (isWeb(id)) return id.substring(WEB.length());
+        if (isIptv(id)) {
+            int bar = id.indexOf('|');
+            return bar > 0 ? id.substring(bar + 1) : "Channel";
+        }
+        if (isWidget(id)) {
+            String w = id.substring(WIDGET.length());
+            for (int i = 0; i < WIDGETS.length; i++) if (WIDGETS[i].equals(w)) return WIDGET_NAMES[i];
+            return w;
+        }
+        for (TvInputInfo info : inputs) if (info.getId().equals(id)) return inputName(this, info);
+        return id;
+    }
+
+    // ---------------------------------------------------------------- Showing a source
+
+    private void showOnly(int idx, boolean tv, boolean panel, boolean web, boolean video) {
+        if (!tv) tvs[idx].reset();
+        tvs[idx].setVisibility(tv ? View.VISIBLE : View.GONE);
+        panels[idx].setVisibility(panel ? View.VISIBLE : View.GONE);
+        if (webs[idx] != null) webs[idx].setVisibility(web ? View.VISIBLE : View.GONE);
+        if (videos[idx] != null) {
+            if (!video) videos[idx].stopPlayback();
+            videos[idx].setVisibility(video ? View.VISIBLE : View.GONE);
+        }
+    }
+
+    private void tuneCell(int idx) {
+        String id = ids[idx];
+        if (id == null) {
+            showOnly(idx, false, true, false, false);
+            showText(idx, "Empty", "Press OK twice to choose");
+            setStatus(idx, "empty");
+        } else if (isWeb(id)) {
+            showWeb(idx);
+        } else if (isIptv(id)) {
+            showIptv(idx);
+        } else if (isWidget(id)) {
+            showOnly(idx, false, true, false, false);
+            panels[idx].setGravity(id.endsWith("calendar") ? Gravity.START | Gravity.CENTER_VERTICAL : Gravity.CENTER);
+            renderWidget(idx);
+            setStatus(idx, "widget");
+        } else if (tim.getInputState(id) == TvInputManager.INPUT_STATE_CONNECTED) {
+            showOnly(idx, true, false, false, false);
+            setStatus(idx, "starting...");
+            tvs[idx].tune(id, TvContract.buildChannelUriForPassthroughInput(id));
+        } else { // an input with nothing playing: text only, no video session
+            showOnly(idx, false, true, false, false);
+            panels[idx].setGravity(Gravity.CENTER);
+            showText(idx, nameOf(id), stateText(id));
+            setStatus(idx, "no signal");
+        }
+    }
+
+    private void showText(int idx, String title, String detail) {
+        panels[idx].setGravity(Gravity.CENTER);
+        panels[idx].setText(title + "\n" + detail);
+    }
+
+    private String stateText(String id) {
+        switch (tim.getInputState(id)) {
+            case TvInputManager.INPUT_STATE_CONNECTED:
+                return "Connected";
+            case TvInputManager.INPUT_STATE_CONNECTED_STANDBY:
+                return "Nothing playing";
+            default:
+                return "No device";
+        }
+    }
+
+    // ---- web
+
+    private void showWeb(int idx) {
+        showOnly(idx, false, false, true, false);
+        WebView w = webs[idx];
+        if (w == null) {
+            w = new WebView(this);
+            WebSettings ws = w.getSettings();
+            ws.setJavaScriptEnabled(true);
+            ws.setDomStorageEnabled(true);
+            ws.setMediaPlaybackRequiresUserGesture(false);
+            ws.setUserAgentString(TV_UA);
+            w.setWebViewClient(new WebViewClient());
+            w.setFocusable(false);
+            holders[idx].addView(w, new FrameLayout.LayoutParams(-1, -1));
+            webs[idx] = w;
+        }
+        w.setVisibility(View.VISIBLE);
+        String url = siteUrl(ids[idx]);
+        if (url != null && !url.equals(w.getUrl())) w.loadUrl(url);
+        setStatus(idx, "web  ·  OK to use, Back to exit, hold OK to change");
+    }
+
+    private void enterWeb(int idx) {
+        WebView w = webs[idx];
+        if (w == null) return;
+        webActive = idx;
+        w.setFocusable(true);
+        w.setFocusableInTouchMode(true);
+        w.requestFocus();
+        setStatus(idx, "web  ·  Back to leave");
+    }
+
+    private void leaveWeb() {
+        int idx = webActive;
+        WebView w = webs[idx];
+        webActive = -1;
+        if (w != null) w.setFocusable(false);
+        cells[idx].requestFocus();
+        setStatus(idx, "web  ·  OK to use, Back to exit, hold OK to change");
+    }
+
+    // ---- IPTV channel
+
+    private void showIptv(final int idx) {
+        showOnly(idx, false, false, false, true);
+        VideoView v = videos[idx];
+        if (v == null) {
+            v = new VideoView(this);
+            v.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
+                @Override
+                public void onPrepared(MediaPlayer mp) {
+                    players[idx] = mp;
+                    float vol = listening == idx ? 1f : 0f;
+                    mp.setVolume(vol, vol);
+                    setStatus(idx, listening == idx ? "live, sound on" : "live");
+                    mp.start();
+                }
+            });
+            v.setOnErrorListener(new MediaPlayer.OnErrorListener() {
+                @Override
+                public boolean onError(MediaPlayer mp, int what, int extra) {
+                    setStatus(idx, "this channel won't play");
+                    return true;
+                }
+            });
+            v.setZOrderOnTop(true);
+            holders[idx].addView(v, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
+            videos[idx] = v;
+        }
+        v.setVisibility(View.VISIBLE);
+        String id = ids[idx];
+        int bar = id.indexOf('|');
+        String url = id.substring(IPTV.length(), bar > 0 ? bar : id.length());
+        setStatus(idx, "loading...");
+        v.stopPlayback();
+        v.setVideoURI(Uri.parse(url));
+    }
+
+    // ---- widgets
+
+    private void renderWidget(int idx) {
+        String w = ids[idx].substring(WIDGET.length());
+        boolean h24 = store.bool("clock24", false);
+        long now = System.currentTimeMillis();
+        SpannableStringBuilder sb = new SpannableStringBuilder();
+        if (w.equals("clock")) {
+            String time = new SimpleDateFormat(h24 ? "HH:mm" : "h:mm a", Locale.getDefault()).format(new Date(now));
+            String date = new SimpleDateFormat("EEEE d MMMM", Locale.getDefault()).format(new Date(now));
+            sb.append(time).setSpan(new RelativeSizeSpan(2.6f), 0, time.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            sb.append("\n").append(date);
+        } else if (w.equals("weather")) {
+            WeatherClient.Report r = Shared.weather;
+            if (r == null) {
+                sb.append("Weather isn't set up\nSettings > Weather");
+            } else {
+                String head = r.temp + "°" + (r.fahrenheit ? "F" : "C");
+                sb.append(head).setSpan(new RelativeSizeSpan(2.4f), 0, head.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                sb.append("\n").append(r.place).append("  ·  ").append(WeatherClient.describe(r.code));
+                for (int i = 0; i < Math.min(3, r.days.size()); i++) {
+                    WeatherClient.Day d = r.days.get(i);
+                    sb.append("\n").append(d.label).append("   ").append(String.valueOf(d.hi)).append("° / ")
+                            .append(String.valueOf(d.lo)).append("°");
+                }
+            }
+        } else {
+            List<IcsCalendar.Event> events = Shared.events;
+            SimpleDateFormat time = new SimpleDateFormat(h24 ? "HH:mm" : "h:mm a", Locale.getDefault());
+            SimpleDateFormat day = new SimpleDateFormat("EEE d MMM", Locale.getDefault());
+            int shown = 0;
+            sb.append("Coming up");
+            sb.setSpan(new RelativeSizeSpan(1.3f), 0, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            for (IcsCalendar.Event e : events) {
+                if (e.end < now && !e.allDay) continue;
+                if (shown++ >= 4) break;
+                sb.append("\n").append(day.format(new Date(e.start))).append(e.allDay ? "  " : "  " + time.format(new Date(e.start)))
+                        .append("  ").append(e.title.isEmpty() ? "(No title)" : e.title);
+            }
+            if (shown == 0) sb.append("\nNothing coming up, or no calendar set up");
+        }
+        panels[idx].setText(sb);
+    }
+
+    // ---------------------------------------------------------------- Choosing a source
+
+    /** Step 1: what kind of thing should this quadrant show? */
+    private void chooseType(final int idx) {
+        final String[] types = {"Input", "Web page", "Live channel", "Widget", "Empty"};
+        new AlertDialog.Builder(this)
+                .setTitle("Quadrant " + (idx + 1) + " shows...")
+                .setItems(types, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        switch (which) {
+                            case 0:
+                                chooseInput(idx);
+                                break;
+                            case 1:
+                                chooseWeb(idx);
+                                break;
+                            case 2:
+                                chooseChannelGroup(idx);
+                                break;
+                            case 3:
+                                chooseWidget(idx);
+                                break;
+                            default:
+                                assign(idx, null);
+                        }
+                    }
+                })
+                .show();
+    }
+
+    private void chooseInput(final int idx) {
+        if (inputs.isEmpty()) {
+            assignMessage(idx, "No inputs found");
+            return;
+        }
+        final String[] names = new String[inputs.size()];
+        for (int i = 0; i < names.length; i++) {
+            TvInputInfo info = inputs.get(i);
+            names[i] = inputName(this, info) + "  (" + stateText(info.getId()) + ")";
+        }
+        new AlertDialog.Builder(this).setTitle("Input")
+                .setItems(names, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        assign(idx, inputs.get(which).getId());
+                    }
+                }).show();
+    }
+
+    private void chooseWeb(final int idx) {
+        final List<String[]> sites = sites();
+        final String[] names = new String[sites.size() + 1];
+        for (int i = 0; i < sites.size(); i++) names[i] = sites.get(i)[0];
+        names[sites.size()] = "Add a web address...";
+        new AlertDialog.Builder(this).setTitle("Web page")
+                .setItems(names, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        if (which < sites.size()) assign(idx, WEB + sites.get(which)[0]);
+                        else askWebAddress(idx);
+                    }
+                }).show();
+    }
+
+    private void askWebAddress(final int idx) {
+        final EditText input = new EditText(this);
+        input.setHint("https://example.com");
+        input.setSingleLine(true);
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        AlertDialog d = new AlertDialog.Builder(this).setTitle("Web address")
+                .setView(input)
+                .setPositiveButton("Show", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        String text = input.getText().toString().trim();
+                        if (text.isEmpty()) return;
+                        List<String> saved = store.lines("web_sites");
+                        if (!saved.contains(text)) saved.add(text);
+                        store.putLines("web_sites", saved);
+                        String name = text.replaceFirst("^(https?://)?(www\\.)?", "").replaceFirst("[/?#].*$", "");
+                        int bar = text.indexOf('|');
+                        if (bar > 0) name = text.substring(0, bar).trim();
+                        assign(idx, WEB + name);
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .create();
+        d.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE);
+        d.show();
+    }
+
+    private void chooseChannelGroup(final int idx) {
+        final List<IptvPlaylist.Channel> all = Shared.channels;
+        if (all == null || all.isEmpty()) {
+            assignMessage(idx, "No channels loaded yet. Set up Live TV in Settings first.");
+            return;
+        }
+        final Map<String, List<IptvPlaylist.Channel>> groups = new LinkedHashMap<>();
+        for (IptvPlaylist.Channel ch : all) {
+            if (!groups.containsKey(ch.group)) groups.put(ch.group, new ArrayList<IptvPlaylist.Channel>());
+            groups.get(ch.group).add(ch);
+        }
+        final List<String> names = new ArrayList<>(groups.keySet());
+        Collections.sort(names, String.CASE_INSENSITIVE_ORDER);
+        final String[] labelsArr = new String[names.size()];
+        for (int i = 0; i < labelsArr.length; i++) labelsArr[i] = names.get(i) + "  (" + groups.get(names.get(i)).size() + ")";
+        new AlertDialog.Builder(this).setTitle("Channel group")
+                .setItems(labelsArr, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        chooseChannel(idx, groups.get(names.get(which)));
+                    }
+                }).show();
+    }
+
+    private void chooseChannel(final int idx, final List<IptvPlaylist.Channel> list) {
+        String[] names = new String[list.size()];
+        for (int i = 0; i < names.length; i++) names[i] = list.get(i).name;
+        new AlertDialog.Builder(this).setTitle("Channel")
+                .setItems(names, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        IptvPlaylist.Channel ch = list.get(which);
+                        assign(idx, IPTV + ch.url + "|" + ch.name);
+                    }
+                }).show();
+    }
+
+    private void chooseWidget(final int idx) {
+        new AlertDialog.Builder(this).setTitle("Widget")
+                .setItems(WIDGET_NAMES, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        assign(idx, WIDGET + WIDGETS[which]);
+                    }
+                }).show();
+    }
+
+    private void assignMessage(int idx, String message) {
+        showOnly(idx, false, true, false, false);
+        showText(idx, "Can't do that", message);
+    }
+
+    private void assign(int idx, String id) {
+        ids[idx] = id;
+        store.put("mvx" + idx, id == null ? "" : id);
+        if (webActive == idx) leaveWeb();
+        tuneCell(idx);
+    }
+
+    // ---------------------------------------------------------------- Sound, labels
+
+    private void listen(int idx) {
+        listening = idx;
+        for (int i = 0; i < CELLS; i++) {
+            float v = i == idx ? 1f : 0f;
+            tvs[i].setStreamVolume(v);
+            if (players[i] != null) {
+                try {
+                    players[i].setVolume(v, v);
+                } catch (IllegalStateException ignored) {
+                    // player released
+                }
+            }
+        }
+        for (int i = 0; i < CELLS; i++) {
+            String id = ids[i];
+            if (id != null && !isWeb(id) && !isWidget(id) && (isIptv(id) || tim.getInputState(id) == TvInputManager.INPUT_STATE_CONNECTED)) {
+                setStatus(i, i == idx ? "live, sound on" : "live");
+            }
+        }
+    }
+
+    private void setStatus(int idx, String status) {
+        if (labels[idx] == null) return;
+        labels[idx].setText(ids[idx] == null ? status : nameOf(ids[idx]) + "  ·  " + status);
+    }
+
+    private static String emptyToNull(String s) {
+        return s == null || s.isEmpty() ? null : s;
+    }
+
+    private static String inputName(Context c, TvInputInfo info) {
+        if (info.getId().endsWith(APPLE_TV_SUFFIX)) return "Apple TV";
+        CharSequence custom = info.loadCustomLabel(c);
+        return String.valueOf(custom != null && custom.length() > 0 ? custom : info.loadLabel(c));
+    }
+}

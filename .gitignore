@@ -1,0 +1,23 @@
+# Dependencies / local tooling
+node_modules/
+.tools/
+.hb/
+.pairing/
+.cursor/
+.superdesign/tmp/
+.superdesign/config.json
+.DS_Store
+
+# Build outputs
+launcher/build/
+*.apk
+*.dex
+*.class
+
+# Local signing (CI generates its own debug key)
+launcher/debug.keystore
+
+# Captures / scratch
+screenshots/
+Untitled/
+*.log

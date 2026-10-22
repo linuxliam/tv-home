@@ -1,0 +1,10 @@
+# Disabled via adb pm disable-user --user 0 (undo with: adb shell pm enable <pkg>)
+com.vt.tv.evservice   # Hisense ACR / Enhanced Viewing Service
+com.vt.tv.smartservice # Firebase analytics + exception logging
+com.google.android.tungsten.setupwraith # Google TV setup wizard; must be disabled FIRST, otherwise its RecoveryActivity loops when launcherx is off
+com.google.android.apps.tv.launcherx    # Google TV launcher, replaced by com.liam.homescreen
+
+# Restore Google's home screen (setupwraith is optional to re-enable):
+#   adb shell pm enable com.google.android.apps.tv.launcherx
+#   adb shell cmd package set-home-activity com.google.android.apps.tv.launcherx/.home.HomeActivity
+#   adb shell pm enable com.google.android.tungsten.setupwraith
