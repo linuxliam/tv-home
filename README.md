@@ -18,15 +18,11 @@ Android TV launcher with a PlayStation-inspired Cross Media Bar, live TV guide, 
 
 ### TV Guide
 
-![Electronic program guide with picture-in-picture](docs/guide.png)
+![Electronic program guide (live preview removed)](docs/guide.png)
 
 ### Multiview
 
 ![Multiview windows — apps, calendar, and weather](docs/multiview.png)
-
-### Player
-
-![Live player](docs/player.png)
 
 ## Build the APK
 
