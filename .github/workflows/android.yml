@@ -24,28 +24,54 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Locate Android SDK
+        id: sdk
+        run: |
+          set -euo pipefail
+          # ubuntu-latest runners ship an Android SDK; prefer that over obsolete "tools" packages.
+          if [ -z "${ANDROID_HOME:-}" ]; then
+            if [ -d /usr/local/lib/android/sdk ]; then
+              echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
+              export ANDROID_HOME=/usr/local/lib/android/sdk
+            elif [ -n "${ANDROID_SDK_ROOT:-}" ]; then
+              echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+              export ANDROID_HOME="$ANDROID_SDK_ROOT"
+            else
+              echo "ANDROID_HOME not found on runner" >&2
+              exit 1
+            fi
+          else
+            echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          fi
+          echo "Using ANDROID_HOME=$ANDROID_HOME"
+          echo "home=$ANDROID_HOME" >> "$GITHUB_OUTPUT"
+
+          # Find sdkmanager (cmdline-tools layout varies by runner image).
+          SM=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager 2>/dev/null | sort | tail -1 || true)
+          if [ -z "$SM" ] && [ -x "$ANDROID_HOME/tools/bin/sdkmanager" ]; then
+            SM="$ANDROID_HOME/tools/bin/sdkmanager"
+          fi
+          if [ -z "$SM" ]; then
+            echo "sdkmanager not found under $ANDROID_HOME" >&2
+            ls -la "$ANDROID_HOME" || true
+            exit 1
+          fi
+          echo "sdkmanager=$SM" >> "$GITHUB_OUTPUT"
+          echo "SDKMANAGER=$SM" >> "$GITHUB_ENV"
 
       - name: Install platform & build-tools
         run: |
-          sdkmanager --install "platforms;android-34" "build-tools;34.0.0"
-          yes | sdkmanager --licenses >/dev/null || true
-
-      - name: Point build at SDK
-        run: |
-          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
-          # Homebrew-style path expected by build.sh falls back; force SDK root.
-          test -d "$ANDROID_HOME"
-          ls "$ANDROID_HOME/build-tools/34.0.0"
-          ls "$ANDROID_HOME/platforms/android-34/android.jar"
+          set -euo pipefail
+          yes | "$SDKMANAGER" --licenses >/tmp/sdk-licenses.txt || true
+          "$SDKMANAGER" "platforms;android-34" "build-tools;34.0.0"
+          test -x "$ANDROID_HOME/build-tools/34.0.0/aapt2"
+          test -f "$ANDROID_HOME/platforms/android-34/android.jar"
 
       - name: Build APK
         working-directory: launcher
         run: |
           set -euo pipefail
-          # build.sh defaults ANDROID_HOME to Homebrew; override for CI.
-          export ANDROID_HOME="${ANDROID_HOME}"
+          export ANDROID_HOME ANDROID_SDK_ROOT="$ANDROID_HOME"
           bash ./build.sh
           test -f build/home.apk
           ls -lh build/home.apk
