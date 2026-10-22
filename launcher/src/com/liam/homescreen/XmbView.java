@@ -742,8 +742,8 @@ final class XmbView extends View {
         subPaint.setTextSize(28 * scale);     // list subtitles
         valuePaint.setTextSize(36 * scale);   // setting values
         labelPaint.setTextSize(32 * scale);   // category labels
-        timePaint.setTextSize(64 * scale);    // clock only
-        smallPaint.setTextSize(22 * scale);   // date, quote, meta, weather detail
+        timePaint.setTextSize(46 * scale);    // clock only
+        smallPaint.setTextSize(20 * scale);   // date, quote, meta, weather detail
         buildFrost(getWidth(), h);
         float w = getWidth();
         vignetteShader = new RadialGradient(w / 2f, h * 0.5f, Math.max(w, h) * 0.85f,
@@ -755,27 +755,30 @@ final class XmbView extends View {
      * list wordmarks can't read through the greeting / clock.
      */
     private void buildFrost(float w, float h) {
-        frostH = Math.max(barY * 0.82f, 130f * scale);
+        // Tall soft veil — readable status at the top, then a long blend into the scene.
+        frostH = Math.max(barY * 0.95f, 210f * scale);
         if (frostH < 40 || w <= 0) return;
         maskPaint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.DST_IN));
         maskPaint.setShader(new LinearGradient(0, 0, 0, frostH,
-                new int[]{0xFF000000, 0xCC000000, 0x00000000},
-                new float[]{0f, 0.45f, 1f}, Shader.TileMode.CLAMP));
+                new int[]{0xFF000000, 0xDD000000, 0x66000000, 0x00000000},
+                new float[]{0f, 0.38f, 0.72f, 1f}, Shader.TileMode.CLAMP));
         int base = blend(corners[0], corners[1], 0.4f);
         boolean lightUi = iconColor == 0xFF000000;
-        // Stronger top band — status text sits here; list icons must not show through.
         int topVeil = lightUi
-                ? ((blend(base, 0xFFFFFFFF, 0.35f) & 0x00FFFFFF) | 0x66000000)
-                : ((blend(base, 0xFF000000, 0.62f) & 0x00FFFFFF) | 0x99000000);
+                ? ((blend(base, 0xFFFFFFFF, 0.35f) & 0x00FFFFFF) | 0x55000000)
+                : ((blend(base, 0xFF000000, 0.58f) & 0x00FFFFFF) | 0x88000000);
         int midVeil = lightUi
-                ? ((blend(base, 0xFFFFFFFF, 0.2f) & 0x00FFFFFF) | 0x22000000)
-                : ((blend(base, 0xFF000000, 0.35f) & 0x00FFFFFF) | 0x44000000);
+                ? ((blend(base, 0xFFFFFFFF, 0.2f) & 0x00FFFFFF) | 0x28000000)
+                : ((blend(base, 0xFF000000, 0.32f) & 0x00FFFFFF) | 0x3A000000);
+        int lowVeil = lightUi
+                ? ((blend(base, 0xFFFFFFFF, 0.12f) & 0x00FFFFFF) | 0x10000000)
+                : ((blend(base, 0xFF000000, 0.2f) & 0x00FFFFFF) | 0x16000000);
         tintPaint.setShader(new LinearGradient(0, 0, 0, frostH,
-                new int[]{topVeil, midVeil, 0x00000000},
-                new float[]{0f, 0.52f, 1f}, Shader.TileMode.CLAMP));
+                new int[]{topVeil, midVeil, lowVeil, 0x00000000},
+                new float[]{0f, 0.4f, 0.72f, 1f}, Shader.TileMode.CLAMP));
         if (Build.VERSION.SDK_INT >= 31) {
             if (blurNode == null) blurNode = new RenderNode("frost");
-            float r = Math.max(8f, 28f * scale);
+            float r = Math.max(10f, 36f * scale);
             blurNode.setRenderEffect(RenderEffect.createBlurEffect(r, r, Shader.TileMode.CLAMP));
         }
     }
@@ -1122,25 +1125,30 @@ final class XmbView extends View {
      */
     private void drawStatusScrub(Canvas c, float w, float a) {
         if (a < 0.02f) return;
-        float band = Math.max(128f * scale, frostH * 0.55f);
+        // Longer ease-out so the header melts into the main view instead of a hard shelf.
+        float band = Math.max(220f * scale, frostH * 0.95f);
         int base = blend(corners[0], corners[1], 0.45f);
         boolean lightUi = iconColor == 0xFF000000;
         int top = lightUi
-                ? ((blend(base, 0xFFFFFFFF, 0.25f) & 0x00FFFFFF) | 0xEE000000)
-                : ((blend(base, 0xFF000000, 0.7f) & 0x00FFFFFF) | 0xF2000000);
-        int bot = 0x00000000;
+                ? ((blend(base, 0xFFFFFFFF, 0.25f) & 0x00FFFFFF) | 0xE0000000)
+                : ((blend(base, 0xFF000000, 0.68f) & 0x00FFFFFF) | 0xE6000000);
+        int rgb = top & 0x00FFFFFF;
+        int topA = (top >>> 24) & 0xFF;
+        int hi = rgb | ((int) (topA * 0.78f) << 24);
+        int mid = rgb | ((int) (topA * 0.42f) << 24);
+        int lo = rgb | ((int) (topA * 0.14f) << 24);
         paint.reset();
         paint.setAntiAlias(true);
         paint.setShader(new LinearGradient(0, 0, 0, band,
-                new int[]{top, top, bot},
-                new float[]{0f, 0.55f, 1f}, Shader.TileMode.CLAMP));
+                new int[]{top, hi, mid, lo, 0x00000000},
+                new float[]{0f, 0.28f, 0.52f, 0.78f, 1f}, Shader.TileMode.CLAMP));
         int save = c.saveLayerAlpha(0, 0, w, band, Math.max(0, Math.min(255, (int) (255 * a))));
         c.drawRect(0, 0, w, band, paint);
         c.restoreToCount(save);
         paint.setShader(null);
     }
 
-    /** Top-left: time-of-day hello + quote of the day (floating XMB text, no glass plate). */
+    /** Top-left: greeting with quote of the day beside the name (not stacked under it). */
     private void drawGreeting(Canvas c, float w, float h, float a) {
         if (a < 0.02f) return;
         long now = System.currentTimeMillis();
@@ -1148,35 +1156,120 @@ final class XmbView extends View {
         cal.setTimeInMillis(now);
         String greet = greetingForHour(cal.get(Calendar.HOUR_OF_DAY));
         String quote = quoteOfDay(now);
+        String body = quote;
+        String by = "";
+        int sep = quote.lastIndexOf(" — ");
+        if (sep >= 0) {
+            body = quote.substring(0, sep).trim();
+            by = quote.substring(sep + 3).trim();
+        }
 
         float left = 56 * scale;
         float timeY = 88 * scale;
-        float maxW = Math.min(w * 0.42f, 640 * scale);
+        // Leave room for the clock / weather cluster on the right.
+        float maxRight = w * 0.52f;
 
         Paint.Align titleAlign = titlePaint.getTextAlign();
         Paint.Align smallAlign = smallPaint.getTextAlign();
+        Typeface smallFace = smallPaint.getTypeface();
+        float smallSize = smallPaint.getTextSize();
+        float smallTracking = smallPaint.getLetterSpacing();
         titlePaint.setTextAlign(Paint.Align.LEFT);
         smallPaint.setTextAlign(Paint.Align.LEFT);
-
-        // Same sizes as list title + date/meta (titlePaint 42, smallPaint 22).
-        String greetShown = TextUtils.ellipsize(greet, titlePaint, maxW, TextUtils.TruncateAt.END).toString();
-        String quoteShown = TextUtils.ellipsize(quote, smallPaint, maxW, TextUtils.TruncateAt.END).toString();
 
         titlePaint.setColor(textColor);
         titlePaint.setAlpha((int) (255 * a));
         softText(titlePaint, a);
-        c.drawText(greetShown, left, timeY, titlePaint);
+        c.drawText(greet, left, timeY, titlePaint);
+
+        float greetW = titlePaint.measureText(greet);
+        float ruleX = left + greetW + 22 * scale;
+        float quoteLeft = ruleX + 18 * scale;
+        float quoteMax = Math.max(60f * scale, maxRight - quoteLeft);
+        if (quoteMax < 80 * scale) {
+            // Narrow screens: fall back to a compact line under the greeting.
+            quoteLeft = left;
+            quoteMax = Math.min(w * 0.42f, 640 * scale);
+            ruleX = -1;
+        }
+
+        float bodySize = 20 * scale;
+        float bySize = 15 * scale;
+        float bodyLead = 24 * scale;
+        Typeface quoteFace = Typeface.create("sans-serif-light", Typeface.ITALIC);
+        if (quoteFace == null) quoteFace = Typeface.create(Typeface.SANS_SERIF, Typeface.ITALIC);
+
+        smallPaint.setTypeface(quoteFace);
+        smallPaint.setTextSize(bodySize);
+        smallPaint.setLetterSpacing(0.015f);
+        String line1 = body;
+        String line2 = null;
+        if (smallPaint.measureText(body) > quoteMax) {
+            int prefer = body.lastIndexOf(' ', Math.max(1, (int) (body.length() * 0.55f)));
+            if (prefer < 8) prefer = body.indexOf(' ', body.length() / 3);
+            if (prefer > 0) {
+                line1 = body.substring(0, prefer).trim();
+                line2 = body.substring(prefer).trim();
+                if (smallPaint.measureText(line1) > quoteMax) {
+                    line1 = TextUtils.ellipsize(line1, smallPaint, quoteMax, TextUtils.TruncateAt.END).toString();
+                }
+                if (smallPaint.measureText(line2) > quoteMax) {
+                    line2 = TextUtils.ellipsize(line2, smallPaint, quoteMax, TextUtils.TruncateAt.END).toString();
+                }
+            } else {
+                line1 = TextUtils.ellipsize(body, smallPaint, quoteMax, TextUtils.TruncateAt.END).toString();
+            }
+        }
+
+        // Quote top edge shares the separator's top (and the greeting's top) when beside the name.
+        float greetTop = timeY + titlePaint.ascent();
+        float quoteY = ruleX >= 0
+                ? greetTop - smallPaint.ascent()
+                : timeY + 32 * scale;
+        float byY = 0f;
+        if (!by.isEmpty()) {
+            byY = quoteY + (line2 != null ? bodyLead : 0f) + 22 * scale;
+        }
+        if (ruleX >= 0) {
+            paint.reset();
+            paint.setAntiAlias(true);
+            paint.setColor(textColor);
+            paint.setAlpha((int) (55 * a));
+            paint.setStrokeWidth(Math.max(1.5f, 1.75f * scale));
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            float ruleBot = byY > 0
+                    ? byY + bySize * 0.15f
+                    : quoteY + (line2 != null ? bodyLead : 0f) + smallPaint.descent();
+            c.drawLine(ruleX, greetTop, ruleX, ruleBot, paint);
+        }
 
         smallPaint.setColor(textColor);
-        smallPaint.setAlpha((int) (155 * a));
+        smallPaint.setAlpha((int) (165 * a));
         softText(smallPaint, a * 0.7f);
-        c.drawText(quoteShown, left, timeY + 34 * scale, smallPaint);
+        c.drawText(line1, quoteLeft, quoteY, smallPaint);
+        if (line2 != null) {
+            c.drawText(line2, quoteLeft, quoteY + bodyLead, smallPaint);
+            quoteY += bodyLead;
+        }
 
+        if (!by.isEmpty()) {
+            smallPaint.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+            smallPaint.setTextSize(bySize);
+            smallPaint.setLetterSpacing(0.14f);
+            String byShown = TextUtils.ellipsize(by.toUpperCase(Locale.US), smallPaint, quoteMax, TextUtils.TruncateAt.END).toString();
+            smallPaint.setAlpha((int) (100 * a));
+            softText(smallPaint, a * 0.45f);
+            c.drawText(byShown, quoteLeft, byY > 0 ? byY : quoteY + 22 * scale, smallPaint);
+        }
+
+        smallPaint.setTypeface(smallFace);
+        smallPaint.setTextSize(smallSize);
+        smallPaint.setLetterSpacing(smallTracking);
         titlePaint.setTextAlign(titleAlign);
         smallPaint.setTextAlign(smallAlign);
     }
 
-    /** Status cluster in the top-right: time leads, date and weather sit quietly beside it. */
+    /** Status cluster in the top-right: compact clock, weather stacked icon-over-text beside it. */
     private void drawClock(Canvas c, float w, float h, float a) {
         long now = System.currentTimeMillis();
         if (now - clockStamp > 1000) {
@@ -1186,12 +1279,12 @@ final class XmbView extends View {
         }
         int al = (int) (255 * a);
         float right = w - 56 * scale;
-        float timeY = 88 * scale;
+        float timeY = 82 * scale;
 
         timePaint.setTextAlign(Paint.Align.RIGHT);
-        timePaint.setTextSize(64 * scale);
+        timePaint.setTextSize(46 * scale);
         smallPaint.setTextAlign(Paint.Align.RIGHT);
-        smallPaint.setTextSize(22 * scale);
+        smallPaint.setTextSize(18 * scale);
 
         timePaint.setColor(textColor);
         timePaint.setAlpha(al);
@@ -1199,14 +1292,14 @@ final class XmbView extends View {
         c.drawText(timeText, right, timeY, timePaint);
 
         smallPaint.setColor(textColor);
-        smallPaint.setAlpha((int) (160 * a));
-        softText(smallPaint, a * 0.7f);
-        c.drawText(dateText, right, timeY + 34 * scale, smallPaint);
+        smallPaint.setAlpha((int) (155 * a));
+        softText(smallPaint, a * 0.65f);
+        c.drawText(dateText, right, timeY + 26 * scale, smallPaint);
 
-        float stackBottom = timeY + 34 * scale;
+        float stackBottom = timeY + 26 * scale;
         if (badge != null) {
             smallPaint.setAlpha((int) (200 * a));
-            float by = stackBottom + 30 * scale;
+            float by = stackBottom + 24 * scale;
             c.drawText(badge, right, by, smallPaint);
             float tw = smallPaint.measureText(badge);
             int accent = blend(corners[2], corners[3], 0.5f);
@@ -1214,36 +1307,41 @@ final class XmbView extends View {
             paint.setAntiAlias(true);
             paint.setColor(accent);
             paint.setAlpha((int) ((140 + 50 * Math.sin(animT * 2.2f)) * a));
-            c.drawCircle(right - tw - 18 * scale, by - 7 * scale, 4.5f * scale, paint);
+            c.drawCircle(right - tw - 16 * scale, by - 6 * scale, 3.5f * scale, paint);
             stackBottom = by;
         }
 
         if (wGlyph >= 0) {
             float clockW = Math.max(timePaint.measureText(timeText), smallPaint.measureText(dateText));
-            float gap = 36 * scale;
+            float gap = 28 * scale;
             float ruleX = right - clockW - gap;
-            // Theme hairline separates weather from the clock — one composition, not two stickers.
             paint.reset();
             paint.setAntiAlias(true);
-            paint.setStrokeWidth(Math.max(1.5f, 1.5f * scale));
+            paint.setStrokeWidth(Math.max(1.25f, 1.25f * scale));
             paint.setColor(textColor);
-            paint.setAlpha((int) (55 * a));
-            c.drawLine(ruleX, timeY - 36 * scale, ruleX, timeY + 28 * scale, paint);
+            paint.setAlpha((int) (50 * a));
+            c.drawLine(ruleX, timeY - 28 * scale, ruleX, timeY + 22 * scale, paint);
 
-            float weatherRight = ruleX - 20 * scale;
-            // Weather uses the same meta size as date/quote (22); temp slightly stronger via alpha only.
+            // Weather: icon snug beside temp; condition right-aligned under the temp.
+            float weatherRight = ruleX - 16 * scale;
+            float metaSize = 17 * scale;
+            smallPaint.setTextSize(metaSize);
             float tempW = smallPaint.measureText(wTemp);
-            float descW = smallPaint.measureText(wDesc);
-            float textBlock = Math.max(tempW, descW);
-            float gs = 52 * scale;
-            float gx = weatherRight - textBlock - 16 * scale - gs / 2f;
+            float gs = 26 * scale;
+            float iconGap = 8 * scale;
+            float tempY = timeY - 6 * scale;
+            // Anchor to temp width only — desc can be wider ("Partly cloudy") without pushing the icon out.
+            float gx = weatherRight - tempW - iconGap - gs / 2f;
             paint.reset();
             paint.setAntiAlias(true);
-            drawGlyph(c, wGlyph, gx, timeY - 4 * scale, gs, textColor, (int) (al * 0.92f), paint, false);
-            smallPaint.setAlpha((int) (220 * a));
-            c.drawText(wTemp, weatherRight, timeY - 8 * scale, smallPaint);
-            smallPaint.setAlpha((int) (150 * a));
-            c.drawText(wDesc, weatherRight, timeY + 22 * scale, smallPaint);
+            drawGlyph(c, wGlyph, gx, tempY - metaSize * 0.28f, gs, textColor, (int) (al * 0.9f), paint, false);
+            smallPaint.setAlpha((int) (210 * a));
+            softText(smallPaint, a * 0.7f);
+            c.drawText(wTemp, weatherRight, tempY, smallPaint);
+            smallPaint.setAlpha((int) (135 * a));
+            softText(smallPaint, a * 0.55f);
+            c.drawText(wDesc, weatherRight, tempY + 22 * scale, smallPaint);
+            smallPaint.setTextSize(18 * scale);
         }
     }
 
@@ -1824,7 +1922,7 @@ final class XmbView extends View {
             if (fromBar < 1f && rel != 0f) a *= fromBar * fromBar;
             // Status header is reserved for greeting / clock — hide list icons & titles there
             // so Disney+ wordmarks can't jumble with the header text.
-            float clearY = Math.max(160f * scale, frostH * 0.88f);
+            float clearY = Math.max(200f * scale, frostH * 0.92f);
             if (y < clearY) {
                 // Hard cut with a short fade into the menu, not a soft bleed through the quote.
                 float t = (y - clearY + rowH * 0.85f) / (rowH * 0.85f);

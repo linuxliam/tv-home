@@ -16,6 +16,7 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.text.InputType;
 import android.view.View;
@@ -61,11 +62,20 @@ public class LauncherActivity extends Activity {
     private static final long WEATHER_EVERY_MS = 15 * 60 * 1000L;
     private static final long CALENDAR_EVERY_MS = 10 * 60 * 1000L;
     private static final long IPTV_EVERY_MS = 6 * 60 * 60 * 1000L;
-    private static final long AMBIENT_IDLE_MS = 3 * 60 * 1000L;
-    private static final long AMBIENT_CYCLE_MS = 20 * 1000L;
+    /** Wait this long with no remote input before the sleep clock. */
+    private static final long AMBIENT_IDLE_MS = 5 * 60 * 1000L;
+    /** Menu → clock swap (must finish before the long brightness dim). */
+    private static final long AMBIENT_UI_MS = 700L;
+    /** Slow panel brightness fade after the clock owns the screen. */
+    private static final long AMBIENT_DIM_MS = 5 * 60 * 1000L;
+    private static final long AMBIENT_WAKE_MS = 500L;
+    /** Don't burn a vsync tick for five minutes — brightness steps are fine at ~8 Hz. */
+    private static final long AMBIENT_DIM_TICK_MS = 125L;
+    private static final long AMBIENT_CLOCK_TICK_MS = 30 * 1000L;
+    /** Dim target as a fraction of full brightness (0 = black, 1 = max). */
+    private static final float AMBIENT_BRIGHTNESS = 0.08f;
     private static final int CALENDAR_DAYS = 14;
     private static final int RECENT_MAX = 12;
-    private static final String[] AMBIENT_KINDS = {"clock", "weather", "calendar"};
 
     // setting choices: stored value -> label
     private static final String[] SIZE_VALUES = {"1.0", "1.2", "1.4", "1.6"};
@@ -78,25 +88,58 @@ public class LauncherActivity extends Activity {
 
     private XmbView xmb;
     private FrameLayout root;
+    private View ambientScrim;
     private WidgetView ambient;
     private boolean searching;
     private final StringBuilder searchQuery = new StringBuilder();
     private boolean ambientOn;
-    private int ambientKind;
+    private boolean ambientAnimating;
+    private float ambientBrightFrom = 1f;
+    private float ambientBrightTo = AMBIENT_BRIGHTNESS;
+    private int ambientSystemBrightSaved = -1;
+    private int ambientSystemModeSaved = -1;
+    private boolean ambientSystemBrightActive;
+    private long ambientAnimStart;
+    private long ambientAnimMs = AMBIENT_DIM_MS;
     private final Runnable showAmbient = new Runnable() {
         @Override
         public void run() {
             enterAmbient();
         }
     };
-    private final Runnable cycleAmbient = new Runnable() {
+    private final Runnable ambientAnimTick = new Runnable() {
+        @Override
+        public void run() {
+            if (!ambientAnimating) return;
+            long elapsed = SystemClock.uptimeMillis() - ambientAnimStart;
+            if (ambientOn) {
+                float uiT = smoothstep(Math.min(1f, elapsed / (float) AMBIENT_UI_MS));
+                float dimT = smoothstep(Math.min(1f, elapsed / (float) AMBIENT_DIM_MS));
+                applyAmbientSleep(uiT, dimT);
+                if (elapsed < AMBIENT_DIM_MS) {
+                    long tick = elapsed < AMBIENT_UI_MS ? 16L : AMBIENT_DIM_TICK_MS;
+                    ui.postDelayed(this, tick);
+                    return;
+                }
+                ambientAnimating = false;
+                return;
+            }
+            float t = smoothstep(Math.min(1f, elapsed / (float) ambientAnimMs));
+            applyAmbientWake(t);
+            if (elapsed < ambientAnimMs) {
+                ui.postDelayed(this, 16L);
+                return;
+            }
+            ambientAnimating = false;
+            finishExitAmbient();
+        }
+    };
+    private final Runnable ambientClockTick = new Runnable() {
         @Override
         public void run() {
             if (!ambientOn || ambient == null) return;
-            ambientKind = (ambientKind + 1) % AMBIENT_KINDS.length;
-            ambient.setClock24(store.bool("clock24", false));
-            ambient.showWidget(AMBIENT_KINDS[ambientKind]);
-            ui.postDelayed(this, AMBIENT_CYCLE_MS);
+            ambient.invalidate();
+            ui.postDelayed(this, AMBIENT_CLOCK_TICK_MS);
         }
     };
     private Store store;
@@ -171,8 +214,16 @@ public class LauncherActivity extends Activity {
         applyAppearance();
         root = new FrameLayout(this);
         root.addView(xmb, new FrameLayout.LayoutParams(-1, -1));
+        ambientScrim = new View(this);
+        ambientScrim.setBackgroundColor(0xFF000000);
+        ambientScrim.setAlpha(0f);
+        ambientScrim.setVisibility(View.GONE);
+        ambientScrim.setClickable(false);
+        ambientScrim.setFocusable(false);
+        root.addView(ambientScrim, new FrameLayout.LayoutParams(-1, -1));
         ambient = new WidgetView(this);
         ambient.setVisibility(View.GONE);
+        ambient.setAlpha(0f);
         ambient.setClickable(true);
         ambient.setFocusable(false);
         root.addView(ambient, new FrameLayout.LayoutParams(-1, -1));
@@ -191,8 +242,9 @@ public class LauncherActivity extends Activity {
         super.onStop();
         if (tvInputs != null) tvInputs.unregisterCallback(inputCallback);
         ui.removeCallbacks(showAmbient);
-        ui.removeCallbacks(cycleAmbient);
-        exitAmbient();
+        ui.removeCallbacks(ambientAnimTick);
+        ui.removeCallbacks(ambientClockTick);
+        exitAmbientImmediate();
     }
 
     @Override
@@ -903,25 +955,203 @@ public class LauncherActivity extends Activity {
         return l;
     }
 
-    // ---- Idle ambient
+    // ---- Idle ambient (clock only, gradual dim)
+
+    private static float smoothstep(float t) {
+        t = Math.max(0f, Math.min(1f, t));
+        return t * t * (3f - 2f * t);
+    }
 
     private void enterAmbient() {
-        if (ambientOn || ambient == null) return;
+        if (ambientOn || ambient == null || ambientScrim == null) return;
         ambientOn = true;
         searching = false;
-        ambientKind = 0;
         ambient.setClock24(store.bool("clock24", false));
-        ambient.showWidget(AMBIENT_KINDS[ambientKind]);
+        ambient.showWidget("clock");
+        ambient.setAlpha(0f);
         ambient.setVisibility(View.VISIBLE);
+        ambientScrim.setBackgroundColor(0xFF000000);
+        ambientScrim.setAlpha(0f);
+        ambientScrim.setVisibility(View.VISIBLE);
+        ambientScrim.bringToFront();
         ambient.bringToFront();
-        ui.removeCallbacks(cycleAmbient);
-        ui.postDelayed(cycleAmbient, AMBIENT_CYCLE_MS);
+
+        captureBrightnessForAmbient();
+        ambientBrightTo = AMBIENT_BRIGHTNESS;
+        ambientAnimMs = AMBIENT_DIM_MS;
+        ambientAnimStart = SystemClock.uptimeMillis();
+        ambientAnimating = true;
+        ui.removeCallbacks(ambientAnimTick);
+        ui.removeCallbacks(ambientClockTick);
+        ui.post(ambientAnimTick);
+        ui.postDelayed(ambientClockTick, AMBIENT_CLOCK_TICK_MS);
     }
 
     private void exitAmbient() {
+        if (!ambientOn && !ambientAnimating) return;
         ambientOn = false;
-        ui.removeCallbacks(cycleAmbient);
-        if (ambient != null) ambient.setVisibility(View.GONE);
+        ui.removeCallbacks(ambientClockTick);
+        // Bring the menu back under the clock before fading the overlay out.
+        if (xmb != null) {
+            xmb.setVisibility(View.VISIBLE);
+            xmb.setAlpha(0f);
+        }
+        float cur = readCurrentBrightnessFraction();
+        ambientBrightFrom = cur;
+        ambientBrightTo = ambientSystemBrightSaved >= 0
+                ? ambientSystemBrightSaved / 255f
+                : 1f;
+        ambientAnimMs = AMBIENT_WAKE_MS;
+        ambientAnimStart = SystemClock.uptimeMillis();
+        ambientAnimating = true;
+        ui.removeCallbacks(ambientAnimTick);
+        ui.post(ambientAnimTick);
+    }
+
+    /** Instant restore (activity stop / teardown) — no wake animation. */
+    private void exitAmbientImmediate() {
+        ambientOn = false;
+        ambientAnimating = false;
+        ui.removeCallbacks(ambientAnimTick);
+        ui.removeCallbacks(ambientClockTick);
+        finishExitAmbient();
+    }
+
+    private void finishExitAmbient() {
+        if (ambient != null) {
+            ambient.setVisibility(View.GONE);
+            ambient.setAlpha(0f);
+        }
+        if (ambientScrim != null) {
+            ambientScrim.setVisibility(View.GONE);
+            ambientScrim.setAlpha(0f);
+        }
+        if (xmb != null) {
+            xmb.setVisibility(View.VISIBLE);
+            xmb.setAlpha(1f);
+        }
+        clearWindowBrightnessOverride();
+        restoreSystemBrightness();
+    }
+
+    /** Never use window brightness — that only dims this app. Drive the panel via Settings.System. */
+    private void clearWindowBrightnessOverride() {
+        WindowManager.LayoutParams lp = getWindow().getAttributes();
+        if (lp.screenBrightness != WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE) {
+            lp.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE;
+            getWindow().setAttributes(lp);
+        }
+    }
+
+    private void captureBrightnessForAmbient() {
+        clearWindowBrightnessOverride();
+        ambientSystemBrightActive = false;
+        ambientSystemBrightSaved = -1;
+        ambientSystemModeSaved = -1;
+        ambientBrightFrom = 1f;
+        try {
+            ambientSystemModeSaved = Settings.System.getInt(getContentResolver(),
+                    Settings.System.SCREEN_BRIGHTNESS_MODE,
+                    Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL);
+            ambientSystemBrightSaved = Settings.System.getInt(getContentResolver(),
+                    Settings.System.SCREEN_BRIGHTNESS, 128);
+            ambientBrightFrom = Math.max(0.05f, Math.min(1f, ambientSystemBrightSaved / 255f));
+            if (ensureWriteSettings()) {
+                Settings.System.putInt(getContentResolver(),
+                        Settings.System.SCREEN_BRIGHTNESS_MODE,
+                        Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL);
+                ambientSystemBrightActive = true;
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private float readCurrentBrightnessFraction() {
+        try {
+            int v = Settings.System.getInt(getContentResolver(), Settings.System.SCREEN_BRIGHTNESS, 128);
+            return Math.max(0.01f, Math.min(1f, v / 255f));
+        } catch (Exception ignored) {
+            return ambientBrightTo;
+        }
+    }
+
+    private boolean ensureWriteSettings() {
+        try {
+            if (Settings.System.canWrite(this)) return true;
+        } catch (Exception ignored) {
+        }
+        // One-shot prompt so the TV can accept system brightness changes from Home.
+        try {
+            Intent i = new Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS);
+            i.setData(Uri.parse("package:" + getPackageName()));
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+        } catch (Exception ignored) {
+        }
+        return false;
+    }
+
+    /** Set the TV panel brightness (0..1 → Settings.System 1..255). */
+    private void setPanelBrightnessFraction(float fraction) {
+        if (!ambientSystemBrightActive) return;
+        try {
+            float b = Math.max(0.01f, Math.min(1f, fraction));
+            int level = Math.max(1, Math.min(255, Math.round(b * 255f)));
+            Settings.System.putInt(getContentResolver(), Settings.System.SCREEN_BRIGHTNESS, level);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void restoreSystemBrightness() {
+        clearWindowBrightnessOverride();
+        if (!ambientSystemBrightActive) {
+            ambientSystemBrightSaved = -1;
+            ambientSystemModeSaved = -1;
+            return;
+        }
+        try {
+            if (ambientSystemBrightSaved >= 0) {
+                Settings.System.putInt(getContentResolver(),
+                        Settings.System.SCREEN_BRIGHTNESS, ambientSystemBrightSaved);
+            }
+            if (ambientSystemModeSaved >= 0) {
+                Settings.System.putInt(getContentResolver(),
+                        Settings.System.SCREEN_BRIGHTNESS_MODE, ambientSystemModeSaved);
+            }
+        } catch (Exception ignored) {
+        }
+        ambientSystemBrightActive = false;
+        ambientSystemBrightSaved = -1;
+        ambientSystemModeSaved = -1;
+    }
+
+    /** Swap to the clock; panel brightness eases down separately over AMBIENT_DIM_MS. */
+    private void applyAmbientSleep(float uiT, float dimT) {
+        if (ambientScrim != null) ambientScrim.setAlpha(uiT);
+        if (ambient != null) ambient.setAlpha(uiT);
+        if (xmb != null) {
+            if (uiT >= 0.98f) {
+                xmb.setVisibility(View.GONE);
+                xmb.setAlpha(1f);
+            } else {
+                xmb.setVisibility(View.VISIBLE);
+                xmb.setAlpha(1f - uiT);
+            }
+        }
+        float b = ambientBrightFrom + (ambientBrightTo - ambientBrightFrom) * dimT;
+        setPanelBrightnessFraction(b);
+    }
+
+    /** Fast wake: restore panel brightness and crossfade back to the menu. */
+    private void applyAmbientWake(float t) {
+        if (ambientScrim != null) ambientScrim.setAlpha(1f - t);
+        if (ambient != null) ambient.setAlpha(1f - t);
+        if (xmb != null) {
+            xmb.setVisibility(View.VISIBLE);
+            xmb.setAlpha(t);
+        }
+        float b = ambientBrightFrom + (ambientBrightTo - ambientBrightFrom) * t;
+        setPanelBrightnessFraction(b);
     }
 
     // ---- Calendar
