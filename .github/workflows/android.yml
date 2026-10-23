@@ -8,6 +8,10 @@ on:
     types: [published]
   workflow_dispatch:
 
+# Attaching home.apk to a release needs write access to the repo's contents.
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build home.apk
