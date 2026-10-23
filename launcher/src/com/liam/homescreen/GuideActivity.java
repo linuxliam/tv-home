@@ -35,7 +35,7 @@ import java.util.Locale;
 /**
  * Spectrum-style guide: live video in the top sky; dark XMB panel along the bottom.
  * Digits jump to a channel number (same as the player). OK tunes in-place; Play opens
- * fullscreen; Back watches the tuned channel.
+ * fullscreen; Back / Esc leaves the guide.
  */
 public class GuideActivity extends Activity {
     static List<IptvPlaylist.Channel> channels;
@@ -76,23 +76,16 @@ public class GuideActivity extends Activity {
 
         DisplayMetrics dm = getResources().getDisplayMetrics();
         int screenH = dm.heightPixels;
-        int screenW = dm.widthPixels;
         int guideH = Math.round(screenH * GUIDE_FRAC);
         int videoAreaH = screenH - guideH;
-        int margin = dp(20);
-        int vh = Math.max(dp(120), videoAreaH - margin * 2);
-        int vw = vh * 16 / 9;
-        if (vw > screenW - margin * 2) {
-            vw = screenW - margin * 2;
-            vh = vw * 9 / 16;
-        }
 
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(0xFF0A0C10);
 
+        // Live preview spans the full top sky (edge-to-edge), not a corner PIP.
         video = new VideoView(this);
-        FrameLayout.LayoutParams vlp = new FrameLayout.LayoutParams(vw, vh, Gravity.TOP | Gravity.START);
-        vlp.setMargins(margin, margin, 0, 0);
+        FrameLayout.LayoutParams vlp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, videoAreaH, Gravity.TOP);
         root.addView(video, vlp);
 
         video.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
@@ -178,12 +171,22 @@ public class GuideActivity extends Activity {
     }
 
     @Override
-    public boolean onKeyDown(int keyCode, KeyEvent event) {
-        if (keyCode == KeyEvent.KEYCODE_BACK) {
-            watchFullscreen(tuned);
-            return true;
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (event.getAction() == KeyEvent.ACTION_DOWN) {
+            int keyCode = NavKeys.navCode(event.getKeyCode(), false);
+            // Back / Esc / ⌫ always leave the guide (same as leaving any other screen).
+            if (keyCode == KeyEvent.KEYCODE_BACK) {
+                finish();
+                return true;
+            }
+            if (guide != null && guide.onGuideKey(keyCode)) return true;
         }
-        if (guide != null && guide.onGuideKey(keyCode)) return true;
+        return super.dispatchKeyEvent(event);
+    }
+
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        // Handled in dispatchKeyEvent so emulator keyboard is not stolen by focus search.
         return super.onKeyDown(keyCode, event);
     }
 
@@ -377,6 +380,8 @@ public class GuideActivity extends Activity {
                     return true;
                 case KeyEvent.KEYCODE_MEDIA_PLAY:
                 case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
+                case KeyEvent.KEYCODE_MEDIA_FAST_FORWARD:
+                    // Play (not Back) opens the channel fullscreen.
                     digits.setLength(0);
                     ui.removeCallbacks(commitDigits);
                     ((GuideActivity) getContext()).watchFullscreen(sel);
@@ -421,7 +426,8 @@ public class GuideActivity extends Activity {
             if (event.getAction() == MotionEvent.ACTION_UP) {
                 float y = event.getY();
                 float infoH = dp(78);
-                float header = infoH + dp(32);
+                // Match paint: rows start at infoH + dp(30).
+                float header = infoH + dp(30);
                 float rowH = rowHeight(infoH);
                 int row = first + (int) ((y - header) / rowH);
                 if (row >= 0 && row < channels.size()) {
@@ -533,7 +539,8 @@ public class GuideActivity extends Activity {
                     float frac = (now - t) / (float) SLOT_MS;
                     float nx = gridLeft + s * slotW + frac * slotW;
                     stroke.setStrokeWidth(dp(2));
-                    stroke.setColor((accent & 0x00FFFFFF) | 0xDD000000);
+                    // Dark sheet: light ink themes need a bright playhead, not a forced-dark accent.
+                    stroke.setColor(darkInk ? 0xE6FFFFFF : ((accent & 0x00FFFFFF) | 0xEE000000));
                     c.drawLine(nx, top - dp(6), nx, footY - dp(8), stroke);
                 }
             }
@@ -607,27 +614,63 @@ public class GuideActivity extends Activity {
                         left + dp(12), y + rowH * 0.62f, small);
             }
 
-            // —— Footer: position left, hints right (XMB text, no pills) ——
+            // —— Footer: position left, key/label hint pairs (same language as XMB home) ——
             small.setTextSize(dp(13));
             softShadow(small, 0.5f);
             String pos = (sel + 1) + " / " + channels.size();
             c.drawText(pos, pad, footY, small);
 
-            String hints = "OK tune   Play watch   0–9 channel   Back fullscreen";
-            softShadow(small, 0.55f);
-            c.drawText(hints, w - pad - small.measureText(hints), footY, small);
+            String[] keys = {"OK", "Play", "0–9", "Back"};
+            String[] labs = {"Tune", "Watch", "Channel", "Leave"};
+            small.setTextAlign(Paint.Align.LEFT);
+            body.setTextAlign(Paint.Align.LEFT);
+            body.setTextSize(dp(13));
+            float pairGap = dp(6);
+            float groupGap = dp(28);
+            float total = 0;
+            for (int i = 0; i < keys.length; i++) {
+                total += body.measureText(keys[i]) + pairGap + small.measureText(labs[i]);
+                if (i < keys.length - 1) total += groupGap;
+            }
+            float hx = w - pad - total;
+            float minHx = pad + small.measureText(pos) + dp(24);
+            if (hx < minHx) {
+                // Narrow: drop middle pairs first.
+                keys = new String[]{"OK", "Back"};
+                labs = new String[]{"Tune", "Leave"};
+                total = 0;
+                for (int i = 0; i < keys.length; i++) {
+                    total += body.measureText(keys[i]) + pairGap + small.measureText(labs[i]);
+                    if (i < keys.length - 1) total += groupGap;
+                }
+                hx = w - pad - total;
+            }
+            for (int i = 0; i < keys.length; i++) {
+                softShadow(body, 0.9f);
+                body.setColor(ink);
+                c.drawText(keys[i], hx, footY, body);
+                hx += body.measureText(keys[i]) + pairGap;
+                softShadow(small, 0.55f);
+                small.setColor(ink);
+                c.drawText(labs[i], hx, footY, small);
+                hx += small.measureText(labs[i]) + groupGap;
+            }
+            small.setTextAlign(Paint.Align.LEFT);
+            body.setTextAlign(Paint.Align.LEFT);
 
             if (notice != null && SystemClock.uptimeMillis() - noticeAt < 2800) {
                 body.setTextSize(dp(15));
                 softShadow(body, 1f);
                 float nw = body.measureText(notice) + dp(28);
                 float nh = dp(34);
-                rect.set(w / 2f - nw / 2f, h - dp(56), w / 2f + nw / 2f, h - dp(56) + nh);
+                // Sit above the footer hint line so toasts don't cover it.
+                float ny = footY - dp(18) - nh;
+                rect.set(w / 2f - nw / 2f, ny, w / 2f + nw / 2f, ny + nh);
                 Glass.panel(c, rect, dp(8), fill, stroke, 0xCC000000);
                 body.setColor(ink);
                 body.clearShadowLayer();
                 body.setAlpha(255);
-                c.drawText(notice, w / 2f - body.measureText(notice) / 2f, h - dp(56) + dp(23), body);
+                c.drawText(notice, w / 2f - body.measureText(notice) / 2f, ny + dp(23), body);
                 postInvalidateOnAnimation();
             }
 

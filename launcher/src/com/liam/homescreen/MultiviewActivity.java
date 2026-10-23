@@ -182,9 +182,11 @@ public class MultiviewActivity extends Activity {
 
             LinearLayout cell = new LinearLayout(this);
             cell.setOrientation(LinearLayout.VERTICAL);
+            cell.setClipChildren(false);
 
             TvView tv = new TvView(this);
-            tv.setZOrderOnTop(true);
+            // Media overlay stays under window chrome / focus ring (unlike ZOrderOnTop).
+            tv.setZOrderMediaOverlay(true);
             tv.setFocusable(false);
             tv.setStreamVolume(0f);
             tv.setCallback(new TvView.TvInputCallback() {
@@ -218,12 +220,18 @@ public class MultiviewActivity extends Activity {
             holder.setDefaultFocusHighlightEnabled(false);
             holder.addView(tv, new FrameLayout.LayoutParams(-1, -1));
             holder.addView(panel, new FrameLayout.LayoutParams(-1, -1));
+            // Ring sits in a margin around the holder so SurfaceView / WebView can't cover the stroke.
+            FrameLayout stack = new FrameLayout(this);
+            int ringPad = dp(3);
+            FrameLayout.LayoutParams holderLp = new FrameLayout.LayoutParams(-1, -1);
+            holderLp.setMargins(ringPad, ringPad, ringPad, ringPad);
+            stack.addView(holder, holderLp);
             View ring = new View(this);
             ring.setBackground(focusRingDrawable(false));
             ring.setVisibility(View.INVISIBLE);
             ring.setFocusable(false);
             ring.setClickable(false);
-            holder.addView(ring, new FrameLayout.LayoutParams(-1, -1));
+            stack.addView(ring, new FrameLayout.LayoutParams(-1, -1));
             focusRings[i] = ring;
             holder.setOnClickListener(new View.OnClickListener() {
                 @Override
@@ -267,7 +275,7 @@ public class MultiviewActivity extends Activity {
                     }
                 }
             });
-            cell.addView(holder, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+            cell.addView(stack, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
             tvs[i] = tv;
             panels[i] = panel;
             holders[i] = holder;
@@ -341,19 +349,20 @@ public class MultiviewActivity extends Activity {
         bar.setPadding(dp(14), dp(8), dp(14), dp(10));
         bar.setVisibility(View.INVISIBLE);
         bar.setBackground(chromeDock());
+        bar.setAlpha(0.88f);
         TextView title = menuTitle();
         title.setText("Windows");
         title.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
-        title.setTextSize(13);
-        title.setAlpha(0.72f);
-        title.setPadding(dp(6), 0, dp(14), 0);
+        title.setTextSize(12);
+        title.setAlpha(0.62f);
+        title.setPadding(dp(4), 0, dp(10), 0);
         bar.addView(title);
         for (int n = 1; n <= CELLS; n++) {
             final int count = n;
             TextView b = new TextView(this);
             b.setId(View.generateViewId());
             b.setText(String.valueOf(n));
-            b.setTextSize(15);
+            b.setTextSize(14);
             b.setGravity(Gravity.CENTER);
             b.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
             b.setTextColor(XmbView.iconColor);
@@ -362,8 +371,8 @@ public class MultiviewActivity extends Activity {
             b.setClickable(true);
             b.setDefaultFocusHighlightEnabled(false);
             b.setBackground(countBg());
-            b.setPadding(dp(16), dp(6), dp(16), dp(6));
-            b.setMinWidth(dp(40));
+            b.setPadding(dp(12), dp(4), dp(12), dp(4));
+            b.setMinWidth(dp(34));
             b.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
@@ -384,7 +393,8 @@ public class MultiviewActivity extends Activity {
         for (int i = 0; i < CELLS; i++) {
             countBtns[i].setNextFocusLeftId(countBtns[i == 0 ? 0 : i - 1].getId());
             countBtns[i].setNextFocusRightId(countBtns[i == CELLS - 1 ? CELLS - 1 : i + 1].getId());
-            countBtns[i].setNextFocusDownId(countBtns[i].getId());
+            // Down returns to the focused window (wired in retargetCountUp / revealChrome).
+            countBtns[i].setNextFocusDownId(View.NO_ID);
         }
         markCount();
         return bar;
@@ -548,15 +558,18 @@ public class MultiviewActivity extends Activity {
 
     /** Dark theme dock under a window / along the Windows bar. */
     private GradientDrawable chromeDock() {
-        return Glass.dock(dp(10));
+        GradientDrawable g = Glass.dock(dp(10));
+        g.setAlpha(200); // calmer Multiview chrome (Superdesign)
+        return g;
     }
 
     private GradientDrawable focusRingDrawable(boolean on) {
         GradientDrawable g = new GradientDrawable();
         g.setColor(Color.TRANSPARENT);
-        g.setCornerRadius(dp(3));
+        g.setCornerRadius(dp(4));
         if (on) {
-            g.setStroke(dp(3), Glass.accentStroke(0xE6000000));
+            // Superdesign calm: thin bright stroke outside the surface.
+            g.setStroke(Math.max(2, dp(1.5f)), Glass.accentStroke(0xF2000000));
         } else {
             g.setStroke(0, Color.TRANSPARENT);
         }
@@ -634,10 +647,12 @@ public class MultiviewActivity extends Activity {
         expanded = idx;
         layoutQuadrants();
         pictures[idx].requestFocus();
+        showFullDock(); // so the way back is visible as soon as the window fills the screen
     }
 
     private void collapse() {
         int idx = expanded;
+        hideFullDockNow(true);
         expanded = -1;
         layoutQuadrants();
         if (idx >= 0) pictures[idx].requestFocus();
@@ -795,7 +810,11 @@ public class MultiviewActivity extends Activity {
         if (actions[focusedCell] != null && actions[focusedCell].getVisibility() == View.VISIBLE) {
             up = soundBtns[focusedCell].getId();
         }
-        for (int i = 0; i < CELLS; i++) countBtns[i].setNextFocusUpId(up);
+        int down = pictures[focusedCell].getId();
+        for (int i = 0; i < CELLS; i++) {
+            countBtns[i].setNextFocusUpId(up);
+            countBtns[i].setNextFocusDownId(down);
+        }
     }
 
     private void revealCountBar() {
@@ -921,13 +940,13 @@ public class MultiviewActivity extends Activity {
     }
 
     private boolean handleMoveKey(KeyEvent event) {
-        int key = event.getKeyCode();
+        int key = NavKeys.navCode(event.getKeyCode(), false);
         if (key == KeyEvent.KEYCODE_DPAD_LEFT || key == KeyEvent.KEYCODE_DPAD_RIGHT
                 || key == KeyEvent.KEYCODE_DPAD_UP || key == KeyEvent.KEYCODE_DPAD_DOWN) {
             if (neighbor(moving, key) != moving) moveDir = key;
             return true;
         }
-        if (key == KeyEvent.KEYCODE_DPAD_CENTER || key == KeyEvent.KEYCODE_ENTER || key == KeyEvent.KEYCODE_NUMPAD_ENTER) {
+        if (key == KeyEvent.KEYCODE_DPAD_CENTER || key == KeyEvent.KEYCODE_ENTER) {
             if (moveDir >= 0) {
                 commitMove();
             } else {
@@ -941,7 +960,7 @@ public class MultiviewActivity extends Activity {
             }
             return true;
         }
-        if (key == KeyEvent.KEYCODE_BACK || key == KeyEvent.KEYCODE_ESCAPE) {
+        if (key == KeyEvent.KEYCODE_BACK) {
             int was = moving;
             cancelMove();
             if (was >= 0) revealChrome(was);
@@ -998,53 +1017,237 @@ public class MultiviewActivity extends Activity {
 
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
+        int mapped = NavKeys.navCode(event.getKeyCode(), false);
         if (moving >= 0 && event.getAction() == KeyEvent.ACTION_DOWN && handleMoveKey(event)) return true;
-        if (event.getAction() == KeyEvent.ACTION_DOWN && expanded < 0 && webActive < 0) {
-            int cell = cellOf(getCurrentFocus());
-            if (cell >= 0) focusedCell = cell;
-            if (cell >= 0 || countFocused(getCurrentFocus())) revealChrome(focusedCell);
+        if (event.getAction() == KeyEvent.ACTION_DOWN) {
+            if (mapped == KeyEvent.KEYCODE_BACK) {
+                onBackPressed();
+                return true;
+            }
+            if (expanded >= 0 && moving < 0 && handleFullDockKey(mapped)) return true;
+            if (expanded < 0 && webActive < 0) {
+                int cell = cellOf(getCurrentFocus());
+                if (cell >= 0) focusedCell = cell;
+                if (cell >= 0 || countFocused(getCurrentFocus())) revealChrome(focusedCell);
+            }
+            if (moving < 0 && webActive < 0 && NavKeys.isActivate(mapped)) {
+                okArmed = true;
+                ui.removeCallbacks(okLong);
+                ui.postDelayed(okLong, android.view.ViewConfiguration.getLongPressTimeout());
+                return true;
+            }
+        }
+        if (event.getAction() == KeyEvent.ACTION_UP && fullDockSwallowUp && NavKeys.isActivate(mapped)) {
+            fullDockSwallowUp = false; // the OK that pressed a dock button must not also click the picture
+            return true;
+        }
+        if (event.getAction() == KeyEvent.ACTION_UP && moving < 0 && webActive < 0 && NavKeys.isActivate(mapped)) {
+            ui.removeCallbacks(okLong);
+            if (okArmed) {
+                okArmed = false;
+                View focus = getCurrentFocus();
+                if (focus != null) {
+                    focus.performClick();
+                    return true;
+                }
+            }
+            return true;
         }
         return super.dispatchKeyEvent(event);
     }
 
-    @Override
-    public boolean onKeyDown(int keyCode, KeyEvent event) {
-        if (moving < 0 && webActive < 0
-                && (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER
-                || keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER)) {
-            event.startTracking();
+    // ---------------------------------------------------------------- Full-screen dock
+
+    /**
+     * While one window fills the screen the wall's action strips are hidden, so a small floating dock
+     * (its own window, so the video cannot cover it) offers Back to Multiview, Sound and Source. It shows
+     * when a window goes full screen, then fades after the same idle time as the other chrome; Down, Up
+     * or Menu bring it back, Left / Right choose, OK does it. Back also returns to the wall.
+     */
+    private PopupWindow fullDock;
+    private LinearLayout fullDockRow;
+    private final View[] fullDockBtns = new View[3];
+    private int fullDockSel;
+    private boolean fullDockShown;
+    private boolean fullDockSwallowUp;
+
+    private final Runnable hideFullDock = new Runnable() {
+        @Override
+        public void run() {
+            hideFullDockNow(false);
+        }
+    };
+
+    private LinearLayout dockButton(String label, int glyph, final Runnable run) {
+        LinearLayout b = new LinearLayout(this);
+        b.setGravity(Gravity.CENTER_VERTICAL);
+        b.setPadding(dp(14), dp(9), dp(18), dp(9));
+        ImageView icon = new ImageView(this);
+        icon.setImageDrawable(new XmbView.GlyphDrawable(glyph, 0));
+        b.addView(icon, new LinearLayout.LayoutParams(dp(24), dp(24)));
+        TextView t = new TextView(this);
+        t.setText(label);
+        t.setTextSize(14);
+        t.setSingleLine(true);
+        t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        t.setTextColor(XmbView.iconColor);
+        t.setPadding(dp(8), 0, 0, 0);
+        b.addView(t);
+        b.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                touchFullDock();
+                run.run();
+            }
+        });
+        return b;
+    }
+
+    private void showFullDock() {
+        if (expanded < 0 || isFinishing()) return;
+        if (fullDockRow == null) {
+            fullDockRow = new LinearLayout(this);
+            fullDockRow.setOrientation(LinearLayout.HORIZONTAL);
+            fullDockRow.setBackground(Glass.dock(dp(14)));
+            fullDockRow.setPadding(dp(8), dp(6), dp(8), dp(6));
+            fullDockBtns[0] = dockButton("Back to Multiview", XmbView.G_MULTI, new Runnable() {
+                @Override
+                public void run() {
+                    collapse();
+                }
+            });
+            fullDockBtns[1] = dockButton("Sound", XmbView.G_SOUND, new Runnable() {
+                @Override
+                public void run() {
+                    if (expanded >= 0) listen(expanded);
+                }
+            });
+            fullDockBtns[2] = dockButton("Source", XmbView.G_INPUT, new Runnable() {
+                @Override
+                public void run() {
+                    if (expanded >= 0) chooseType(expanded);
+                }
+            });
+            for (View b : fullDockBtns) {
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                lp.setMargins(dp(2), 0, dp(2), 0);
+                fullDockRow.addView(b, lp);
+            }
+        }
+        fullDockSel = 0;
+        renderFullDock();
+        if (fullDock == null) {
+            fullDock = new PopupWindow(fullDockRow, ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT, false);
+            fullDock.setFocusable(false);
+            fullDock.setTouchable(true);
+            fullDock.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+        }
+        fullDockRow.animate().cancel();
+        if (!fullDock.isShowing()) {
+            fullDockRow.setAlpha(0f);
+            fullDock.showAtLocation(getWindow().getDecorView(), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL, 0, dp(40));
+        }
+        fullDockRow.animate().alpha(1f).setDuration(160).start();
+        fullDockShown = true;
+        touchFullDock();
+    }
+
+    private void touchFullDock() {
+        ui.removeCallbacks(hideFullDock);
+        ui.postDelayed(hideFullDock, CHROME_HIDE_MS);
+    }
+
+    private void hideFullDockNow(boolean immediate) {
+        ui.removeCallbacks(hideFullDock);
+        fullDockShown = false;
+        if (fullDock == null || fullDockRow == null || !fullDock.isShowing()) return;
+        fullDockRow.animate().cancel();
+        if (immediate) {
+            fullDock.dismiss();
+            return;
+        }
+        fullDockRow.animate().alpha(0f).setDuration(450).withEndAction(new Runnable() {
+            @Override
+            public void run() {
+                if (!fullDockShown && fullDock != null && fullDock.isShowing()) fullDock.dismiss();
+            }
+        }).start();
+    }
+
+    private void renderFullDock() {
+        for (int i = 0; i < fullDockBtns.length; i++) {
+            GradientDrawable g = new GradientDrawable();
+            g.setCornerRadius(dp(10));
+            g.setColor(i == fullDockSel ? 0x55FFFFFF : 0x00000000);
+            fullDockBtns[i].setBackground(g);
+        }
+    }
+
+    /** Keys for the full-screen dock. Returns true when the key was used. */
+    private boolean handleFullDockKey(int mapped) {
+        if (mapped == KeyEvent.KEYCODE_MENU) {
+            if (fullDockShown) hideFullDockNow(false);
+            else showFullDock();
             return true;
         }
+        if (fullDockShown) {
+            if (mapped == KeyEvent.KEYCODE_DPAD_LEFT || mapped == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                int next = fullDockSel + (mapped == KeyEvent.KEYCODE_DPAD_LEFT ? -1 : 1);
+                fullDockSel = Math.max(0, Math.min(fullDockBtns.length - 1, next));
+                renderFullDock();
+                touchFullDock();
+                return true;
+            }
+            if (mapped == KeyEvent.KEYCODE_DPAD_UP || mapped == KeyEvent.KEYCODE_DPAD_DOWN) {
+                hideFullDockNow(false); // up / down tuck it away
+                return true;
+            }
+            if (NavKeys.isActivate(mapped)) {
+                fullDockSwallowUp = true;
+                fullDockBtns[fullDockSel].performClick();
+                return true;
+            }
+            return false;
+        }
+        if (webActive < 0 && (mapped == KeyEvent.KEYCODE_DPAD_DOWN || mapped == KeyEvent.KEYCODE_DPAD_UP)) {
+            showFullDock();
+            return true;
+        }
+        return false;
+    }
+
+    /** The Source list opens under the Source button, or under the dock while a window is full screen. */
+    private View sourceAnchor(int idx) {
+        if (expanded >= 0 && fullDockRow != null && fullDockRow.isAttachedToWindow()) return fullDockRow;
+        return sourceBtns[idx];
+    }
+
+    private boolean okArmed;
+    private final Runnable okLong = new Runnable() {
+        @Override
+        public void run() {
+            if (!okArmed) return;
+            okArmed = false;
+            int idx = cellOf(getCurrentFocus());
+            if (idx < 0) idx = focusedCell;
+            if (idx >= 0 && slotOf(idx) >= 0) beginMove(idx);
+        }
+    };
+
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
         return super.onKeyDown(keyCode, event);
     }
 
     @Override
     public boolean onKeyUp(int keyCode, KeyEvent event) {
-        if (moving < 0 && webActive < 0
-                && (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER
-                || keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER)
-                && (event.getFlags() & KeyEvent.FLAG_CANCELED_LONG_PRESS) == 0) {
-            View focus = getCurrentFocus();
-            if (focus != null) {
-                focus.performClick();
-                return true;
-            }
-        }
         return super.onKeyUp(keyCode, event);
     }
 
     @Override
     public boolean onKeyLongPress(int keyCode, KeyEvent event) {
-        if (moving < 0 && webActive < 0
-                && (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER
-                || keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER)) {
-            int idx = cellOf(getCurrentFocus());
-            if (idx < 0) idx = focusedCell;
-            if (idx >= 0 && slotOf(idx) >= 0) {
-                beginMove(idx);
-                return true;
-            }
-        }
         return super.onKeyLongPress(keyCode, event);
     }
 
@@ -1067,6 +1270,7 @@ public class MultiviewActivity extends Activity {
         cancelMove();
         clearTip();
         dismissSourcePopup();
+        hideFullDockNow(true);
         for (int i = 0; i < CELLS; i++) {
             live[i] = false;
             hdmiOn[i] = false;
@@ -1390,7 +1594,7 @@ public class MultiviewActivity extends Activity {
                     return true;
                 }
             });
-            v.setZOrderOnTop(true);
+            v.setZOrderMediaOverlay(true);
             holders[idx].addView(v, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
             videos[idx] = v;
         }
@@ -1415,7 +1619,7 @@ public class MultiviewActivity extends Activity {
     /** The source lists sit under the quadrant and stay up while you move through them. */
     private void sourceList(int idx, String title, String[] items, XmbDialog.Pick pick) {
         dismissSourcePopup();
-        sourcePopup = XmbDialog.popup(this, sourceBtns[idx], title, items, 8, pick);
+        sourcePopup = XmbDialog.popup(this, sourceAnchor(idx), title, items, 8, pick);
     }
 
     /** Step 1: what kind of thing should this quadrant show? */

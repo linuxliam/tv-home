@@ -12,6 +12,8 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.TextPaint;
+import android.text.TextUtils;
 import android.util.DisplayMetrics;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -87,6 +89,12 @@ public class PlayerActivity extends Activity {
 
         status = new StatusLabel(this);
         root.addView(status, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER));
+
+        HintBar hints = new HintBar(this);
+        FrameLayout.LayoutParams hlp = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.END);
+        hlp.setMargins(pad, pad, pad, pad);
+        root.addView(hints, hlp);
+
         setContentView(root);
 
         video.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
@@ -158,7 +166,19 @@ public class PlayerActivity extends Activity {
     }
 
     @Override
-    public boolean onKeyDown(int keyCode, KeyEvent event) {
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (event.getAction() != KeyEvent.ACTION_DOWN) return super.dispatchKeyEvent(event);
+        int raw = event.getKeyCode();
+        int keyCode = NavKeys.navCode(raw, false);
+        // Space = play/pause on the player (not OK).
+        if (raw == KeyEvent.KEYCODE_SPACE || keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE) {
+            togglePause();
+            return true;
+        }
+        if (keyCode == KeyEvent.KEYCODE_BACK) {
+            finish();
+            return true;
+        }
         switch (keyCode) {
             case KeyEvent.KEYCODE_DPAD_UP:
             case KeyEvent.KEYCODE_CHANNEL_UP:
@@ -181,9 +201,6 @@ public class PlayerActivity extends Activity {
                 GuideActivity.startIndex = index;
                 startActivity(new Intent(this, GuideActivity.class));
                 return true;
-            case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
-                togglePause();
-                return true;
             case KeyEvent.KEYCODE_MEDIA_PLAY:
                 if (paused) togglePause();
                 return true;
@@ -203,8 +220,13 @@ public class PlayerActivity extends Activity {
                 digit((char) ('0' + (keyCode - KeyEvent.KEYCODE_0)));
                 return true;
             default:
-                return super.onKeyDown(keyCode, event);
+                return super.dispatchKeyEvent(event);
         }
+    }
+
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        return super.onKeyDown(keyCode, event);
     }
 
     @Override
@@ -224,8 +246,8 @@ public class PlayerActivity extends Activity {
         private String sub = "";
         private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint subPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final TextPaint text = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+        private final TextPaint subPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
         private final RectF rect = new RectF();
         private final float density;
 
@@ -276,15 +298,68 @@ public class PlayerActivity extends Activity {
             rect.set(0, 0, w, h);
             Glass.panel(c, rect, r, fill, stroke, 0xCC000000);
 
+            float padX = dp(22);
+            float maxText = Math.max(0f, w - padX * 2);
             text.setColor(XmbView.iconColor);
             text.setAlpha(255);
-            float tx = dp(22);
+            float tx = padX;
             float ty = dp(14) + dp(18);
-            c.drawText(title, tx, ty, text);
+            String titleShown = TextUtils.ellipsize(title, text, maxText, TextUtils.TruncateAt.END).toString();
+            c.drawText(titleShown, tx, ty, text);
             if (!sub.isEmpty()) {
                 subPaint.setColor(XmbView.iconColor);
                 subPaint.setAlpha(175);
-                c.drawText(sub, tx, ty + dp(20), subPaint);
+                String subShown = TextUtils.ellipsize(sub, subPaint, maxText, TextUtils.TruncateAt.END).toString();
+                c.drawText(subShown, tx, ty + dp(20), subPaint);
+            }
+        }
+    }
+
+    /** Floating XMB-style key/label hints (matches home / guide language). */
+    private static final class HintBar extends View {
+        private final TextPaint key = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+        private final TextPaint lab = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+        private final float density;
+        private final String[] keys = {"▲▼", "0–9", "Guide", "Back"};
+        private final String[] labs = {"Channel", "Jump", "Browse", "Leave"};
+
+        HintBar(Activity a) {
+            super(a);
+            density = a.getResources().getDisplayMetrics().density;
+            key.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            key.setTextSize(14f * density);
+            lab.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+            lab.setTextSize(14f * density);
+        }
+
+        @Override
+        protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+            float pairGap = 6f * density;
+            float groupGap = 28f * density;
+            float w = 0;
+            for (int i = 0; i < keys.length; i++) {
+                w += key.measureText(keys[i]) + pairGap + lab.measureText(labs[i]);
+                if (i < keys.length - 1) w += groupGap;
+            }
+            setMeasuredDimension(Math.round(w), Math.round(22f * density));
+        }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            int ink = XmbView.iconColor;
+            float pairGap = 6f * density;
+            float groupGap = 28f * density;
+            float x = 0;
+            float y = 16f * density;
+            for (int i = 0; i < keys.length; i++) {
+                key.setColor(ink);
+                key.setAlpha(230);
+                c.drawText(keys[i], x, y, key);
+                x += key.measureText(keys[i]) + pairGap;
+                lab.setColor(ink);
+                lab.setAlpha(140);
+                c.drawText(labs[i], x, y, lab);
+                x += lab.measureText(labs[i]) + groupGap;
             }
         }
     }
@@ -297,11 +372,9 @@ public class PlayerActivity extends Activity {
         StatusLabel(Activity a) {
             super(a);
             density = a.getResources().getDisplayMetrics().density;
-            p.setColor(0xFFFFFFFF);
             p.setTextSize(18f * density);
             p.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
             p.setTextAlign(Paint.Align.CENTER);
-            p.setShadowLayer(2f * density, 0, density, 0x99000000);
         }
 
         void setText(String t) {
@@ -326,6 +399,10 @@ public class PlayerActivity extends Activity {
         @Override
         protected void onDraw(Canvas c) {
             if (text.isEmpty()) return;
+            p.setColor(XmbView.iconColor);
+            int ink = XmbView.iconColor;
+            int shadow = ink == 0xFF000000 ? 0x44FFFFFF : 0x99000000;
+            p.setShadowLayer(2f * density, 0, density, shadow);
             String[] lines = text.split("\n");
             float y = 20 * density;
             float cx = getWidth() / 2f;

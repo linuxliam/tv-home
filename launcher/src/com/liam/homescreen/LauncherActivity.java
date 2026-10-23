@@ -19,6 +19,7 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.provider.Settings;
 import android.text.InputType;
+import android.view.Gravity;
 import android.view.View;
 import android.widget.FrameLayout;
 import android.view.KeyEvent;
@@ -90,10 +91,35 @@ public class LauncherActivity extends Activity {
     private FrameLayout root;
     private View ambientScrim;
     private WidgetView ambient;
+    private EmuPad emuPad;
     private boolean searching;
     private final StringBuilder searchQuery = new StringBuilder();
     private boolean ambientOn;
     private boolean ambientAnimating;
+    /** True while OK/Enter is held and a long-press Options callback is pending. */
+    private boolean okLongArmed;
+    private final Runnable okLongPress = new Runnable() {
+        @Override
+        public void run() {
+            if (!okLongArmed || ambientOn) return;
+            okLongArmed = false;
+            xmb.longActivate();
+            bumpIdle();
+        }
+    };
+    /** Hold Back to jump all the way out of nested menus. */
+    private boolean backLongArmed;
+    private final Runnable backLongPress = new Runnable() {
+        @Override
+        public void run() {
+            if (!backLongArmed || ambientOn) return;
+            backLongArmed = false;
+            searching = false;
+            xmb.closeAll();
+            xmb.notice("Back to main menu");
+            bumpIdle();
+        }
+    };
     private float ambientBrightFrom = 1f;
     private float ambientBrightTo = AMBIENT_BRIGHTNESS;
     private int ambientSystemBrightSaved = -1;
@@ -227,7 +253,30 @@ public class LauncherActivity extends Activity {
         ambient.setClickable(true);
         ambient.setFocusable(false);
         root.addView(ambient, new FrameLayout.LayoutParams(-1, -1));
+        // Do not make root focusable — a focused ViewGroup eats DPAD for focus-search and
+        // keyboard/emulator arrows never reach the XMB handlers.
+        if (EmuPad.needed()) {
+            emuPad = new EmuPad(this);
+            emuPad.setListener(new EmuPad.Listener() {
+                @Override
+                public void onPad(int keyCode) {
+                    KeyEvent down = new KeyEvent(KeyEvent.ACTION_DOWN, keyCode);
+                    KeyEvent up = new KeyEvent(KeyEvent.ACTION_UP, keyCode);
+                    dispatchKeyEvent(down);
+                    dispatchKeyEvent(up);
+                }
+            });
+            FrameLayout.LayoutParams plp = new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+                    Gravity.BOTTOM | Gravity.START);
+            plp.setMargins(dp(24), 0, 0, dp(24));
+            root.addView(emuPad, plp);
+        }
         setContentView(root);
+    }
+
+    private int dp(int v) {
+        return Math.round(v * getResources().getDisplayMetrics().density);
     }
 
     @Override
@@ -310,17 +359,45 @@ public class LauncherActivity extends Activity {
         }
     }
 
-    // ---------------------------------------------------------------- Remote keys
+    // ---------------------------------------------------------------- Remote / keyboard keys
 
+    /**
+     * Handle nav at the activity gate so focused children (and emulator DPAD focus-search)
+     * cannot swallow arrows before the XMB sees them.
+     */
     @Override
-    public boolean onKeyDown(int keyCode, KeyEvent event) {
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (event.getAction() == KeyEvent.ACTION_DOWN && handleNavDown(event)) return true;
+        if (event.getAction() == KeyEvent.ACTION_UP && handleNavUp(event)) return true;
+        return super.dispatchKeyEvent(event);
+    }
+
+    private boolean handleNavDown(KeyEvent event) {
+        int raw = event.getKeyCode();
+        int keyCode = NavKeys.navCode(raw, searching);
         if (ambientOn) {
             exitAmbient();
             bumpIdle();
-            // swallow this key so it only wakes the menu
             return true;
         }
         bumpIdle();
+        if (keyCode == KeyEvent.KEYCODE_BACK) {
+            // Single Back steps out one menu; hold Back clears the whole stack.
+            backLongArmed = true;
+            ui.removeCallbacks(backLongPress);
+            ui.postDelayed(backLongPress, android.view.ViewConfiguration.getLongPressTimeout());
+            return true;
+        }
+        // Launcher-only shortcuts (not remapped globally — would surprise other screens).
+        if (!searching && raw == KeyEvent.KEYCODE_H) {
+            searching = false;
+            xmb.goHome();
+            return true;
+        }
+        if (!searching && raw == KeyEvent.KEYCODE_G) {
+            openGuideFromKey();
+            return true;
+        }
         if (keyCode == KeyEvent.KEYCODE_SEARCH) {
             openSearch('\0');
             return true;
@@ -337,27 +414,38 @@ public class LauncherActivity extends Activity {
             resumeLive(0);
             return true;
         }
-        if (keyCode == KeyEvent.KEYCODE_DEL || keyCode == KeyEvent.KEYCODE_FORWARD_DEL) {
-            if (searching && searchQuery.length() > 0) {
+        // While typing a search, Backspace edits the query (not menu-back).
+        if (searching && (raw == KeyEvent.KEYCODE_DEL || raw == KeyEvent.KEYCODE_FORWARD_DEL)) {
+            if (searchQuery.length() > 0) {
                 searchQuery.setLength(searchQuery.length() - 1);
                 refreshSearch();
                 return true;
             }
+            searching = false;
+            bumpIdle();
+            return true;
         }
-        char typed = typeChar(keyCode, event);
-        if (typed != 0) {
-            if (searching) {
-                if (searchQuery.length() < 40) searchQuery.append(typed);
-                refreshSearch();
-                return true;
-            }
-            if (!xmb.inSubmenu()) {
-                openSearch(typed);
-                return true;
+        if (raw == keyCode || searching) {
+            char typed = typeChar(raw, event);
+            if (typed != 0) {
+                if (searching) {
+                    if (searchQuery.length() < 40) searchQuery.append(typed);
+                    refreshSearch();
+                    return true;
+                }
+                if (!xmb.inSubmenu()) {
+                    openSearch(typed);
+                    return true;
+                }
             }
         }
         switch (keyCode) {
             case KeyEvent.KEYCODE_DPAD_LEFT:
+                // In a submenu, Left steps back a level (classic XMB).
+                if (xmb.inSubmenu() || searching) {
+                    onBackPressed();
+                    return true;
+                }
                 xmb.moveCat(-1);
                 return true;
             case KeyEvent.KEYCODE_DPAD_RIGHT:
@@ -374,34 +462,47 @@ public class LauncherActivity extends Activity {
                 return true;
             case KeyEvent.KEYCODE_DPAD_CENTER:
             case KeyEvent.KEYCODE_ENTER:
-                event.startTracking(); // so a long press can be told apart from a press
+                // Own long-press timer — we consume keys before Activity.onKeyDown tracking.
+                okLongArmed = true;
+                ui.removeCallbacks(okLongPress);
+                ui.postDelayed(okLongPress, android.view.ViewConfiguration.getLongPressTimeout());
                 return true;
             default:
-                return super.onKeyDown(keyCode, event);
+                return false;
         }
     }
 
-    @Override
-    public boolean onKeyUp(int keyCode, KeyEvent event) {
+    private boolean handleNavUp(KeyEvent event) {
+        int keyCode = NavKeys.navCode(event.getKeyCode(), searching);
         if (ambientOn) return true;
-        if ((keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER)
-                && (event.getFlags() & KeyEvent.FLAG_CANCELED_LONG_PRESS) == 0) {
-            xmb.activate();
-            bumpIdle();
+        if (keyCode == KeyEvent.KEYCODE_BACK) {
+            ui.removeCallbacks(backLongPress);
+            if (backLongArmed) {
+                backLongArmed = false;
+                onBackPressed();
+                bumpIdle();
+            }
             return true;
         }
-        return super.onKeyUp(keyCode, event);
+        if (NavKeys.isActivate(keyCode)) {
+            ui.removeCallbacks(okLongPress);
+            if (okLongArmed) {
+                okLongArmed = false;
+                xmb.activate();
+                bumpIdle();
+            }
+            return true;
+        }
+        return false;
     }
 
-    @Override
-    public boolean onKeyLongPress(int keyCode, KeyEvent event) {
-        if (ambientOn) return true;
-        if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER) {
-            xmb.longActivate();
-            bumpIdle();
-            return true;
+    /** Keyboard G → open the live guide without hunting the Live column. */
+    private void openGuideFromKey() {
+        if (channels == null || channels.isEmpty()) {
+            xmb.notice("No channels loaded yet");
+            return;
         }
-        return super.onKeyLongPress(keyCode, event);
+        openGuide(channels, -1);
     }
 
     private static char typeChar(int keyCode, KeyEvent event) {
@@ -975,6 +1076,8 @@ public class LauncherActivity extends Activity {
         ambientScrim.setVisibility(View.VISIBLE);
         ambientScrim.bringToFront();
         ambient.bringToFront();
+        // Keep the emulator D-pad above the ambient clock so navigation still works.
+        if (emuPad != null) emuPad.bringToFront();
 
         captureBrightnessForAmbient();
         ambientBrightTo = AMBIENT_BRIGHTNESS;
@@ -1513,14 +1616,23 @@ public class LauncherActivity extends Activity {
         };
     }
 
+    /** The version set in the manifest (shown in About). */
+    private String versionName() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (PackageManager.NameNotFoundException e) {
+            return "?";
+        }
+    }
+
     private XmbView.ListBuilder aboutBuilder() {
         return new XmbView.ListBuilder() {
             @Override
             public List<XmbView.Item> build() {
                 List<XmbView.Item> l = new ArrayList<>();
                 Drawable i = glyph(XmbView.G_INFO);
-                l.add(info("Home", "A cross media bar launcher for this TV", i));
-                l.add(info("Design", "Layout, colour themes and ribbon follow RetroArch's XMB (libretro/RetroArch)", i));
+                l.add(info("Home", "A cross media bar launcher for this TV", i).value("Version " + versionName()));
+                l.add(info("Design","Layout, colour themes and ribbon follow RetroArch's XMB (libretro/RetroArch)", i));
                 l.add(info("Weather data", "Open-Meteo", i));
                 l.add(info("Channels loaded", null, i).value(String.valueOf(channels.size())));
                 l.add(info("Calendar events", null, i).value(String.valueOf(events.size())));

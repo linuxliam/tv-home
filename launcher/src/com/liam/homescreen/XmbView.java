@@ -319,6 +319,8 @@ final class XmbView extends View {
     private String notice;
     private String badge;
     private long noticeAt;
+    /** Left edge of the clock/weather cluster — greeting/quote must stay left of this. */
+    private float statusLeft = Float.MAX_VALUE;
 
     // ribbon mesh and particles
     private static final int RIB_ROWS = 30;
@@ -1166,8 +1168,9 @@ final class XmbView extends View {
 
         float left = 56 * scale;
         float timeY = 88 * scale;
-        // Leave room for the clock / weather cluster on the right.
-        float maxRight = w * 0.52f;
+        // Stacked header (Superdesign variant): quote under greeting — open middle sky.
+        float quoteMax = Math.min(w * 0.42f, statusLeft - left - 48 * scale);
+        if (quoteMax < 120 * scale) quoteMax = Math.min(w * 0.42f, 640 * scale);
 
         Paint.Align titleAlign = titlePaint.getTextAlign();
         Paint.Align smallAlign = smallPaint.getTextAlign();
@@ -1182,20 +1185,9 @@ final class XmbView extends View {
         softText(titlePaint, a);
         c.drawText(greet, left, timeY, titlePaint);
 
-        float greetW = titlePaint.measureText(greet);
-        float ruleX = left + greetW + 22 * scale;
-        float quoteLeft = ruleX + 18 * scale;
-        float quoteMax = Math.max(60f * scale, maxRight - quoteLeft);
-        if (quoteMax < 80 * scale) {
-            // Narrow screens: fall back to a compact line under the greeting.
-            quoteLeft = left;
-            quoteMax = Math.min(w * 0.42f, 640 * scale);
-            ruleX = -1;
-        }
-
-        float bodySize = 20 * scale;
-        float bySize = 15 * scale;
-        float bodyLead = 24 * scale;
+        float bodySize = 18 * scale;
+        float bySize = 14 * scale;
+        float bodyLead = 22 * scale;
         Typeface quoteFace = Typeface.create("sans-serif-light", Typeface.ITALIC);
         if (quoteFace == null) quoteFace = Typeface.create(Typeface.SANS_SERIF, Typeface.ITALIC);
 
@@ -1221,45 +1213,24 @@ final class XmbView extends View {
             }
         }
 
-        // Quote top edge shares the separator's top (and the greeting's top) when beside the name.
-        float greetTop = timeY + titlePaint.ascent();
-        float quoteY = ruleX >= 0
-                ? greetTop - smallPaint.ascent()
-                : timeY + 32 * scale;
-        float byY = 0f;
-        if (!by.isEmpty()) {
-            byY = quoteY + (line2 != null ? bodyLead : 0f) + 22 * scale;
-        }
-        if (ruleX >= 0) {
-            paint.reset();
-            paint.setAntiAlias(true);
-            paint.setColor(textColor);
-            paint.setAlpha((int) (55 * a));
-            paint.setStrokeWidth(Math.max(1.5f, 1.75f * scale));
-            paint.setStrokeCap(Paint.Cap.ROUND);
-            float ruleBot = byY > 0
-                    ? byY + bySize * 0.15f
-                    : quoteY + (line2 != null ? bodyLead : 0f) + smallPaint.descent();
-            c.drawLine(ruleX, greetTop, ruleX, ruleBot, paint);
-        }
-
+        float quoteY = timeY + 36 * scale;
         smallPaint.setColor(textColor);
         smallPaint.setAlpha((int) (165 * a));
         softText(smallPaint, a * 0.7f);
-        c.drawText(line1, quoteLeft, quoteY, smallPaint);
+        c.drawText(line1, left, quoteY, smallPaint);
         if (line2 != null) {
-            c.drawText(line2, quoteLeft, quoteY + bodyLead, smallPaint);
+            c.drawText(line2, left, quoteY + bodyLead, smallPaint);
             quoteY += bodyLead;
         }
 
         if (!by.isEmpty()) {
             smallPaint.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
             smallPaint.setTextSize(bySize);
-            smallPaint.setLetterSpacing(0.14f);
+            smallPaint.setLetterSpacing(0.15f);
             String byShown = TextUtils.ellipsize(by.toUpperCase(Locale.US), smallPaint, quoteMax, TextUtils.TruncateAt.END).toString();
             smallPaint.setAlpha((int) (100 * a));
             softText(smallPaint, a * 0.45f);
-            c.drawText(byShown, quoteLeft, byY > 0 ? byY : quoteY + 22 * scale, smallPaint);
+            c.drawText(byShown, left, quoteY + 22 * scale, smallPaint);
         }
 
         smallPaint.setTypeface(smallFace);
@@ -1296,53 +1267,51 @@ final class XmbView extends View {
         softText(smallPaint, a * 0.65f);
         c.drawText(dateText, right, timeY + 26 * scale, smallPaint);
 
+        float clockW = Math.max(timePaint.measureText(timeText), smallPaint.measureText(dateText));
+        float clusterLeft = right - clockW;
         float stackBottom = timeY + 26 * scale;
-        if (badge != null) {
+
+        // Weather under clock (stacked header variant) — keeps the center open.
+        if (wGlyph >= 0) {
+            float metaSize = 16 * scale;
+            float gs = 22 * scale;
+            float iconGap = 8 * scale;
+            float weatherY = stackBottom + 28 * scale;
+            smallPaint.setTextSize(metaSize);
+            String descShown = TextUtils.ellipsize(wDesc, smallPaint, Math.max(48f * scale, clockW * 0.9f),
+                    TextUtils.TruncateAt.END).toString();
+            String line = wTemp + "  " + descShown;
+            float lineW = smallPaint.measureText(line);
+            float gx = right - lineW - iconGap - gs / 2f;
+            paint.reset();
+            paint.setAntiAlias(true);
+            drawGlyph(c, wGlyph, gx, weatherY - metaSize * 0.28f, gs, textColor, (int) (al * 0.9f), paint, false);
             smallPaint.setAlpha((int) (200 * a));
-            float by = stackBottom + 24 * scale;
-            c.drawText(badge, right, by, smallPaint);
-            float tw = smallPaint.measureText(badge);
+            softText(smallPaint, a * 0.7f);
+            c.drawText(line, right, weatherY, smallPaint);
+            smallPaint.setTextSize(18 * scale);
+            stackBottom = weatherY;
+            clusterLeft = Math.min(clusterLeft, gx - gs / 2f);
+        }
+
+        // Badge under weather / date (ellipsized to clock column).
+        if (badge != null) {
+            float badgeMax = Math.max(60f * scale, clockW);
+            String badgeShown = TextUtils.ellipsize(badge, smallPaint, badgeMax, TextUtils.TruncateAt.END).toString();
+            smallPaint.setAlpha((int) (200 * a));
+            softText(smallPaint, a * 0.7f);
+            float by = stackBottom + 22 * scale;
+            c.drawText(badgeShown, right, by, smallPaint);
+            float tw = smallPaint.measureText(badgeShown);
             int accent = blend(corners[2], corners[3], 0.5f);
             paint.reset();
             paint.setAntiAlias(true);
             paint.setColor(accent);
             paint.setAlpha((int) ((140 + 50 * Math.sin(animT * 2.2f)) * a));
             c.drawCircle(right - tw - 16 * scale, by - 6 * scale, 3.5f * scale, paint);
-            stackBottom = by;
+            clusterLeft = Math.min(clusterLeft, right - tw - 24 * scale);
         }
-
-        if (wGlyph >= 0) {
-            float clockW = Math.max(timePaint.measureText(timeText), smallPaint.measureText(dateText));
-            float gap = 28 * scale;
-            float ruleX = right - clockW - gap;
-            paint.reset();
-            paint.setAntiAlias(true);
-            paint.setStrokeWidth(Math.max(1.25f, 1.25f * scale));
-            paint.setColor(textColor);
-            paint.setAlpha((int) (50 * a));
-            c.drawLine(ruleX, timeY - 28 * scale, ruleX, timeY + 22 * scale, paint);
-
-            // Weather: icon snug beside temp; condition right-aligned under the temp.
-            float weatherRight = ruleX - 16 * scale;
-            float metaSize = 17 * scale;
-            smallPaint.setTextSize(metaSize);
-            float tempW = smallPaint.measureText(wTemp);
-            float gs = 26 * scale;
-            float iconGap = 8 * scale;
-            float tempY = timeY - 6 * scale;
-            // Anchor to temp width only — desc can be wider ("Partly cloudy") without pushing the icon out.
-            float gx = weatherRight - tempW - iconGap - gs / 2f;
-            paint.reset();
-            paint.setAntiAlias(true);
-            drawGlyph(c, wGlyph, gx, tempY - metaSize * 0.28f, gs, textColor, (int) (al * 0.9f), paint, false);
-            smallPaint.setAlpha((int) (210 * a));
-            softText(smallPaint, a * 0.7f);
-            c.drawText(wTemp, weatherRight, tempY, smallPaint);
-            smallPaint.setAlpha((int) (135 * a));
-            softText(smallPaint, a * 0.55f);
-            c.drawText(wDesc, weatherRight, tempY + 22 * scale, smallPaint);
-            smallPaint.setTextSize(18 * scale);
-        }
+        statusLeft = clusterLeft;
     }
 
     /** Quiet depth under type — never a heavy drop shadow. */
@@ -2010,31 +1979,32 @@ final class XmbView extends View {
         String[] keys;
         String[] labels;
         if (!stack.isEmpty()) {
-            keys = new String[]{"OK", "Back"};
-            labels = new String[]{"Select", "Return"};
+            keys = new String[]{"OK", "Back", "Hold Back"};
+            labels = new String[]{"Select", "Leave", "Main menu"};
         } else if (it != null && it.longAction != null) {
-            keys = new String[]{"OK", "Hold OK", "◀ ▶"};
-            labels = new String[]{"Open", "Options", "Category"};
+            keys = new String[]{"OK", "Hold OK", "◀ ▶", "Back"};
+            labels = new String[]{"Open", "Options", "Category", "Leave"};
         } else {
-            keys = new String[]{"OK", "◀ ▶"};
-            labels = new String[]{"Open", "Category"};
+            keys = new String[]{"OK", "◀ ▶", "Back"};
+            labels = new String[]{"Enter", "Category", "Leave"};
         }
-        // Floating XMB text — same type + soft shadow as titles/date; no dark pills.
+        // Floating XMB text — key/label pairs with wider pair gaps (Superdesign gap-10 / gap-2).
         float total = 0;
         TextPaint kp = labelPaint;
         float old = kp.getTextSize();
         Paint.Align oldAlign = kp.getTextAlign();
-        kp.setTextSize(22 * scale);
+        kp.setTextSize(18 * scale);
         kp.setTextAlign(Paint.Align.LEFT);
         smallPaint.setTextAlign(Paint.Align.LEFT);
-        smallPaint.setTextSize(22 * scale);
-        float gap = 36 * scale;
+        smallPaint.setTextSize(18 * scale);
+        float pairGap = 8 * scale;
+        float gap = 40 * scale;
         float[] kw = new float[keys.length];
         float[] lw = new float[keys.length];
         for (int i = 0; i < keys.length; i++) {
             kw[i] = kp.measureText(keys[i]);
             lw[i] = smallPaint.measureText(labels[i]);
-            total += kw[i] + 10 * scale + lw[i] + (i < keys.length - 1 ? gap : 0);
+            total += kw[i] + pairGap + lw[i] + (i < keys.length - 1 ? gap : 0);
         }
         float x = w - 56 * scale - total;
         float baseline = h - 52 * scale;
@@ -2044,10 +2014,10 @@ final class XmbView extends View {
             softText(kp, ha);
             c.drawText(keys[i], x, baseline, kp);
             smallPaint.setColor(textColor);
-            smallPaint.setAlpha((int) (155 * ha));
-            softText(smallPaint, ha * 0.7f);
-            c.drawText(labels[i], x + kw[i] + 10 * scale, baseline, smallPaint);
-            x += kw[i] + 10 * scale + lw[i] + gap;
+            smallPaint.setAlpha((int) (140 * ha));
+            softText(smallPaint, ha * 0.65f);
+            c.drawText(labels[i], x + kw[i] + pairGap, baseline, smallPaint);
+            x += kw[i] + pairGap + lw[i] + gap;
         }
         kp.setTextSize(old);
         kp.setTextAlign(oldAlign);
