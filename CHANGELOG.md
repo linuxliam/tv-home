@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.0
+
+- **Metro home layout (default)** — flat hubs + tiles on a dark plane; accent focus edge. Switch back to the Cross media bar under Settings → Home screen → Home layout.
+- Guide: Rewind / red key snaps the time axis to **Now**; focused row uses a Metro accent leading edge.
+- Design system notes updated for dual layout.
+
 ## 1.0.0
 
 First release.

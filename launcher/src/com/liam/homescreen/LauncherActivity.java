@@ -40,9 +40,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * Home screen in the style of RetroArch's XMB. Left/Right change category, Up/Down move through the
- * items, OK opens or changes, holding OK (or Menu) opens the item's quick menu, Back leaves a submenu.
- * Every setting lives in the Settings category; long text can be entered on the TV or from a phone.
+ * Home screen with selectable layout: Metro (flat hubs + tiles, default) or RetroArch XMB.
+ * Left/Right change category, Up/Down move through the items, OK opens or changes, holding OK
+ * (or Menu) opens the item's quick menu, Back leaves a submenu. Every setting lives in the
+ * Settings category; long text can be entered on the TV or from a phone.
  */
 public class LauncherActivity extends Activity {
     // Seeds the Favorites list on first run. Everything else is in Apps, alphabetically.
@@ -341,13 +342,16 @@ public class LauncherActivity extends Activity {
 
     /** Push every appearance setting into the view. */
     private void applyAppearance() {
+        xmb.setLayoutMode(store.get("layout", "metro"));
         xmb.setTheme(store.get("theme", "electric_blue"));
-        xmb.setBackgroundStyle(store.get("bg", "ribbon"));
+        // Metro prefers a still plane; keep the user's XMB backdrop choice when on XMB.
+        String bg = store.get("bg", xmb.isMetro() ? "none" : "ribbon");
+        xmb.setBackgroundStyle(bg);
         xmb.setBackgroundSpeed(Float.parseFloat(store.get("bgspeed", "0.45")));
         xmb.setScaleFactor(Float.parseFloat(store.get("size", "1.2")));
         xmb.setIconMode(store.get("icons", "auto"));
         xmb.setShadows(store.bool("shadows", true));
-        xmb.setFrosted(store.bool("frost", true));
+        xmb.setFrosted(store.bool("frost", !xmb.isMetro()));
         xmb.setHints(store.bool("hints", true));
         xmb.setAnimMs(Integer.parseInt(store.get("anim", "180")));
         xmb.setClock24(store.bool("clock24", false));
@@ -1388,7 +1392,7 @@ public class LauncherActivity extends Activity {
         cat.items.add(settingItem("Sound", "Output, equaliser", XmbView.G_SOUND, "android.settings.SOUND_SETTINGS"));
         cat.items.add(settingItem("Network", "Wi-Fi and internet", XmbView.G_WIFI, Settings.ACTION_WIFI_SETTINGS));
         cat.items.add(settingItem("All TV settings", "Everything else", XmbView.G_GEAR, Settings.ACTION_SETTINGS));
-        cat.items.add(submenu("Home screen", "Theme, size, background, sounds", XmbView.G_BRUSH, appearanceBuilder()));
+        cat.items.add(submenu("Home screen", "Layout, theme, size, background, sounds", XmbView.G_BRUSH, appearanceBuilder()));
         cat.items.add(submenu("Weather", "City and units", XmbView.G_SUN, weatherBuilder()));
         cat.items.add(submenu("Calendar", "Calendar links", XmbView.G_CAL, calendarBuilder()));
         cat.items.add(submenu("Live TV playlists", "IPTV playlist links", XmbView.G_LIVE, playlistBuilder()));
@@ -1455,13 +1459,14 @@ public class LauncherActivity extends Activity {
                 List<XmbView.Item> l = new ArrayList<>();
                 String[] themeLabels = new String[XmbView.THEME_ORDER.length];
                 for (int i = 0; i < themeLabels.length; i++) themeLabels[i] = XmbView.themeLabel(XmbView.THEME_ORDER[i]);
+                l.add(cycle("layout", "Home layout", XmbView.LAYOUT_ORDER, XmbView.LAYOUT_LABELS, "metro", XmbView.G_GRID));
                 l.add(cycle("theme", "Menu colour theme", XmbView.THEME_ORDER, themeLabels, "electric_blue", XmbView.G_BRUSH));
                 l.add(cycle("bg", "Background", XmbView.BG_ORDER, BG_LABELS, "ribbon", XmbView.G_BRUSH));
                 l.add(cycle("bgspeed", "Background speed", Choices.BGSPEED_VALUES, Choices.BGSPEED_LABELS, "0.45", XmbView.G_PLAY));
                 l.add(cycle("size", "Menu size", SIZE_VALUES, SIZE_LABELS, "1.2", XmbView.G_PICTURE));
                 l.add(cycle("icons", "Icon and text colour", ICON_VALUES, ICON_LABELS, "auto", XmbView.G_BRUSH));
                 l.add(toggle("shadows", "Shadows", true, XmbView.G_BRUSH));
-                l.add(toggle("frost", "Frosted glass top edge", true, XmbView.G_BRUSH));
+                l.add(toggle("frost", "Frosted glass top edge", false, XmbView.G_BRUSH));
                 l.add(toggle("hints", "Button hints", true, XmbView.G_INFO));
                 l.add(cycle("anim", "Animation speed", ANIM_VALUES, ANIM_LABELS, "180", XmbView.G_PLAY));
                 l.add(toggle("sounds", "Menu sounds", false, XmbView.G_SOUND));
@@ -1469,7 +1474,7 @@ public class LauncherActivity extends Activity {
                 l.add(new XmbView.Item("Reset home screen options", "Back to the defaults", glyph(XmbView.G_GEAR), new Runnable() {
                     @Override
                     public void run() {
-                        for (String k : new String[]{"theme", "bg", "bgspeed", "size", "icons", "shadows", "frost", "hints", "anim", "sounds", "clock24"}) {
+                        for (String k : new String[]{"layout", "theme", "bg", "bgspeed", "size", "icons", "shadows", "frost", "hints", "anim", "sounds", "clock24"}) {
                             store.remove(k);
                         }
                         settingsChanged();
@@ -1632,7 +1637,7 @@ public class LauncherActivity extends Activity {
                 List<XmbView.Item> l = new ArrayList<>();
                 Drawable i = glyph(XmbView.G_INFO);
                 l.add(info("Home", "A cross media bar launcher for this TV", i).value("Version " + versionName()));
-                l.add(info("Design","Layout, colour themes and ribbon follow RetroArch's XMB (libretro/RetroArch)", i));
+                l.add(info("Design", "Metro hub (default) or RetroArch XMB; colour themes shared across both", i));
                 l.add(info("Weather data", "Open-Meteo", i));
                 l.add(info("Channels loaded", null, i).value(String.valueOf(channels.size())));
                 l.add(info("Calendar events", null, i).value(String.valueOf(events.size())));

@@ -365,6 +365,16 @@ public class GuideActivity extends Activity {
                     else gridStart -= SLOT_MS;
                     invalidate();
                     return true;
+                case KeyEvent.KEYCODE_MEDIA_REWIND:
+                case KeyEvent.KEYCODE_PROG_RED:
+                    // Snap the time axis to "now" (Metro / 10-foot EPG expectation).
+                    digits.setLength(0);
+                    ui.removeCallbacks(commitDigits);
+                    snapGrid();
+                    slot = 0;
+                    notice("Now");
+                    invalidate();
+                    return true;
                 case KeyEvent.KEYCODE_DPAD_RIGHT:
                     digits.setLength(0);
                     ui.removeCallbacks(commitDigits);
@@ -561,7 +571,10 @@ public class GuideActivity extends Activity {
                     fill.setStyle(Paint.Style.FILL);
                     fill.setShader(null);
                     fill.setColor(darkInk ? 0x22000000 : 0x2AFFFFFF);
-                    c.drawRoundRect(rect, dp(8), dp(8), fill);
+                    c.drawRoundRect(rect, dp(4), dp(4), fill);
+                    // Metro-style accent leading edge for 10-foot focus.
+                    fill.setColor((accent & 0x00FFFFFF) | 0xEE000000);
+                    c.drawRect(rect.left, rect.top, rect.left + dp(4), rect.bottom, fill);
                 }
 
                 // Channel number — fixed column, XMB light type.
@@ -620,8 +633,8 @@ public class GuideActivity extends Activity {
             String pos = (sel + 1) + " / " + channels.size();
             c.drawText(pos, pad, footY, small);
 
-            String[] keys = {"OK", "Play", "0–9", "Back"};
-            String[] labs = {"Tune", "Watch", "Channel", "Leave"};
+            String[] keys = {"OK", "Play", "Rew", "0–9", "Back"};
+            String[] labs = {"Tune", "Watch", "Now", "Channel", "Leave"};
             small.setTextAlign(Paint.Align.LEFT);
             body.setTextAlign(Paint.Align.LEFT);
             body.setTextSize(dp(13));

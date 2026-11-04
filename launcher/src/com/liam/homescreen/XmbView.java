@@ -38,12 +38,14 @@ import java.util.Map;
 import java.util.Random;
 
 /**
- * A cross media bar in the style of RetroArch's XMB menu (itself a PS3 XMB clone): categories
- * across the bar, the selected category's items running down beneath it, previous items above the
- * bar, submenus that take over the column, value columns for settings, on-screen notices, and a
- * choice of ribbon / simple ribbon / snow / bokeh backgrounds. Metrics, zoom and alpha factors,
- * colour themes and the ribbon formula follow RetroArch's menu/drivers/xmb.c; animations are
- * time-based with easing. Everything is drawn on one canvas.
+ * Living-room home menu drawn on one canvas. Two layout languages share the same categories,
+ * items, D-pad model and themes:
+ * <ul>
+ *   <li>{@code xmb} — RetroArch / PS3 Cross Media Bar (default historically)</li>
+ *   <li>{@code metro} — Xbox / early Windows Metro–inspired hub + flat tiles (modern dark base)</li>
+ * </ul>
+ * XMB metrics still follow RetroArch's menu/drivers/xmb.c; Metro keeps the same navigation but
+ * paints hubs and focused tiles instead of the floating icon cross.
  */
 final class XmbView extends View {
     static final int G_PLAY = 0, G_GRID = 1, G_INPUT = 2, G_GEAR = 3, G_PICTURE = 4,
@@ -207,6 +209,9 @@ final class XmbView extends View {
             "apple_green", "undersea", "volcanic_red", "dark", "gray_dark", "ice_cold", "gamecube_purple",
             "flaming_hot", "pikachu_yellow", "famicom_red"};
     static final String[] BG_ORDER = {"ribbon", "simple_ribbon", "snow", "bokeh", "none"};
+    /** Home layout language: Metro (tiles) or classic XMB. */
+    static final String[] LAYOUT_ORDER = {"metro", "xmb"};
+    static final String[] LAYOUT_LABELS = {"Metro", "Cross media bar"};
     private static final Map<String, int[]> THEMES = new HashMap<>();
 
     static {
@@ -275,6 +280,8 @@ final class XmbView extends View {
 
     // settings applied from the launcher
     private String bgStyle = "ribbon";
+    /** {@code metro} or {@code xmb}. */
+    private String layoutMode = "metro";
     private float menuScale = 1.2f;
     private boolean shadows = true;
     private String iconMode = "auto";
@@ -440,6 +447,21 @@ final class XmbView extends View {
 
     void setBackgroundStyle(String s) {
         bgStyle = s;
+    }
+
+    /** {@code metro} (flat hub + tiles) or {@code xmb} (cross media bar). */
+    void setLayoutMode(String mode) {
+        if (mode == null) mode = "metro";
+        mode = mode.trim().toLowerCase(Locale.ROOT);
+        if (!"xmb".equals(mode) && !"metro".equals(mode)) mode = "metro";
+        if (mode.equals(layoutMode)) return;
+        layoutMode = mode;
+        layout();
+        invalidate();
+    }
+
+    boolean isMetro() {
+        return "metro".equals(layoutMode);
     }
 
     /** Draw only the animated background, with no menu, clock, or button hints. */
@@ -734,18 +756,33 @@ final class XmbView extends View {
         if (h <= 0) return;
         // RetroArch's PS3 layout is defined for a 1080p screen at menu scale 1.0.
         scale = h / 1080f * menuScale;
-        iconSize = 128 * scale;
-        spacingH = 192 * scale;
-        rowH = 64 * scale;
-        barY = 272 * scale;
-        anchorX = 336 * scale;
-        // Shared type scale (1080p units × scale) — status / menu / chrome stay in one family.
-        titlePaint.setTextSize(42 * scale);   // list titles, greeting
-        subPaint.setTextSize(28 * scale);     // list subtitles
-        valuePaint.setTextSize(36 * scale);   // setting values
-        labelPaint.setTextSize(32 * scale);   // category labels
-        timePaint.setTextSize(46 * scale);    // clock only
-        smallPaint.setTextSize(20 * scale);   // date, quote, meta, weather detail
+        if (isMetro()) {
+            // Metro: larger tiles, left hub rail, room under the status strip.
+            iconSize = 96 * scale;
+            spacingH = 210 * scale;
+            rowH = 92 * scale;
+            barY = 248 * scale;
+            anchorX = 300 * scale;
+            titlePaint.setTextSize(36 * scale);
+            subPaint.setTextSize(22 * scale);
+            valuePaint.setTextSize(32 * scale);
+            labelPaint.setTextSize(28 * scale);
+            timePaint.setTextSize(48 * scale);
+            smallPaint.setTextSize(18 * scale);
+        } else {
+            iconSize = 128 * scale;
+            spacingH = 192 * scale;
+            rowH = 64 * scale;
+            barY = 272 * scale;
+            anchorX = 336 * scale;
+            // Shared type scale (1080p units × scale) — status / menu / chrome stay in one family.
+            titlePaint.setTextSize(42 * scale);   // list titles, greeting
+            subPaint.setTextSize(28 * scale);     // list subtitles
+            valuePaint.setTextSize(36 * scale);   // setting values
+            labelPaint.setTextSize(32 * scale);   // category labels
+            timePaint.setTextSize(46 * scale);    // clock only
+            smallPaint.setTextSize(20 * scale);   // date, quote, meta, weather detail
+        }
         buildFrost(getWidth(), h);
         float w = getWidth();
         vignetteShader = new RadialGradient(w / 2f, h * 0.5f, Math.max(w, h) * 0.85f,
@@ -803,7 +840,7 @@ final class XmbView extends View {
         for (Cat cat : cats) cat.selPos.update(now);
         for (Level l : stack) l.selPos.update(now);
 
-        if (bgStyle.equals("ribbon")) updateRibbon(w, h, bgPhase);
+        if (!isMetro() && bgStyle.equals("ribbon")) updateRibbon(w, h, bgPhase);
         drawBackground(c, w, h, cp);
         if (backdropOnly) {
             scheduleNextFrame(now, false);
@@ -811,10 +848,13 @@ final class XmbView extends View {
         }
         drawScene(c, w, h, t, cp, dp, in);
         // Glass sits over the scene so list items dissolve under the status header.
-        boolean glass = frosted && frostH > 40 && Build.VERSION.SDK_INT >= 31 && blurNode != null
-                && c.isHardwareAccelerated();
-        if (glass) compositeFrost(c, w, h, cp);
-        else if (frosted && frostH > 40) c.drawRect(0, 0, w, frostH, tintPaint);
+        // Metro keeps a flat dark plane — skip milky frost so tiles stay sharp.
+        if (!isMetro()) {
+            boolean glass = frosted && frostH > 40 && Build.VERSION.SDK_INT >= 31 && blurNode != null
+                    && c.isHardwareAccelerated();
+            if (glass) compositeFrost(c, w, h, cp);
+            else if (frosted && frostH > 40) c.drawRect(0, 0, w, frostH, tintPaint);
+        }
         // Opaque status scrub — kills any leftover wordmarks under greeting / clock.
         drawStatusScrub(c, w, in);
         drawClock(c, w, h, in);
@@ -834,7 +874,8 @@ final class XmbView extends View {
     }
 
     private boolean needsContinuousFrames(boolean menu) {
-        if (!bgStyle.equals("none") && bgSpeed > 0.01f) return true;
+        // Metro defaults to a still plane; only animate when an XMB backdrop is moving.
+        if (!isMetro() && !bgStyle.equals("none") && bgSpeed > 0.01f) return true;
         if (backdropOnly) return false;
         if (!menu) return false;
         if (press.cur != press.to || catPos.cur != catPos.to || depth.cur != depth.to || intro.cur != intro.to) {
@@ -865,6 +906,10 @@ final class XmbView extends View {
     /** Theme gradient, drifting backdrop and vignette. */
     private void drawBackground(Canvas c, float w, float h, float cp) {
         rect.set(0, 0, w, h);
+        if (isMetro()) {
+            drawMetroBackdrop(c, w, h);
+            return;
+        }
         if (background != null) c.drawBitmap(background, null, rect, bgPaint);
         c.save();
         float drift = -(cp - (cats.size() - 1) / 2f) * 20 * scale;
@@ -878,6 +923,25 @@ final class XmbView extends View {
             c.drawRect(0, 0, w, h, paint);
             paint.setShader(null);
         }
+    }
+
+    /** Dark living-room plane with a quiet theme accent wash — Metro, not ribbon. */
+    private void drawMetroBackdrop(Canvas c, float w, float h) {
+        paint.reset();
+        paint.setAntiAlias(true);
+        int deep = blend(corners[0], 0xFF05070C, 0.72f);
+        int lift = blend(corners[1], 0xFF101820, 0.55f);
+        paint.setShader(new LinearGradient(0, 0, w * 0.85f, h,
+                new int[]{deep, lift, blend(deep, corners[3], 0.22f)},
+                new float[]{0f, 0.55f, 1f}, Shader.TileMode.CLAMP));
+        c.drawRect(0, 0, w, h, paint);
+        paint.setShader(null);
+        // Soft accent bloom in the lower-right — atmosphere without competing with focus.
+        int accent = (accentColor() & 0x00FFFFFF) | 0x28000000;
+        paint.setShader(new RadialGradient(w * 0.82f, h * 0.78f, Math.max(w, h) * 0.55f,
+                accent, 0x00000000, Shader.TileMode.CLAMP));
+        c.drawRect(0, 0, w, h, paint);
+        paint.setShader(null);
     }
 
     /**
@@ -901,6 +965,11 @@ final class XmbView extends View {
 
     /** Categories, the open submenu and the button hints. */
     private void drawScene(Canvas c, float w, float h, float t, float cp, float dp, float in) {
+        if (isMetro()) {
+            drawMetroScene(c, w, h, cp, dp, in);
+            drawFooter(c, w, h, dp, in);
+            return;
+        }
         float slide = (1f - in) * 40 * scale; // start-up: the menu slides up into place
         c.save();
         c.translate(0, slide);
@@ -921,6 +990,169 @@ final class XmbView extends View {
         drawBar(c, w, h, cp, dp, in);
         c.restore();
         drawFooter(c, w, h, dp, in);
+    }
+
+    /**
+     * Metro hub: horizontal category pivots + vertical flat tiles. Same D-pad map as XMB
+     * (◀▶ categories, ▲▼ items) so remote muscle memory and Homebridge keys stay valid.
+     */
+    private void drawMetroScene(Canvas c, float w, float h, float cp, float dp, float in) {
+        float slide = (1f - in) * 28 * scale;
+        c.save();
+        c.translate(0, slide);
+        drawMetroHubs(c, w, cp, dp, in);
+        if (cats.size() > 0 && dp < 0.98f) {
+            Cat cat = cats.get(Math.max(0, Math.min(catIndex, cats.size() - 1)));
+            drawMetroTiles(c, w, h, cat.items, cat.selPos.cur, (1f - dp) * in, true);
+        }
+        if (!stack.isEmpty() || dp > 0.01f) {
+            Level l = stack.isEmpty() ? null : stack.get(stack.size() - 1);
+            if (l != null) {
+                // Submenu title as a quiet pivot label.
+                Typeface old = labelPaint.getTypeface();
+                Paint.Align oldAlign = labelPaint.getTextAlign();
+                labelPaint.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
+                labelPaint.setTextAlign(Paint.Align.LEFT);
+                labelPaint.setColor(textColor);
+                labelPaint.setAlpha((int) (230 * dp * in));
+                softText(labelPaint, dp * in);
+                c.drawText(l.title, 56 * scale, barY - 8 * scale, labelPaint);
+                labelPaint.setTypeface(old);
+                labelPaint.setTextAlign(oldAlign);
+                drawMetroTiles(c, w, h, l.items, l.selPos.cur, dp * in, true);
+            }
+        }
+        c.restore();
+    }
+
+    private void drawMetroHubs(Canvas c, float w, float cp, float dp, float in) {
+        if (cats.isEmpty() || dp > 0.95f) return;
+        float y = barY - 36 * scale;
+        float x = 56 * scale;
+        Typeface old = labelPaint.getTypeface();
+        float oldSize = labelPaint.getTextSize();
+        Paint.Align oldAlign = labelPaint.getTextAlign();
+        labelPaint.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
+        labelPaint.setTextAlign(Paint.Align.LEFT);
+        labelPaint.setTextSize(34 * scale);
+        for (int i = 0; i < cats.size(); i++) {
+            Cat cat = cats.get(i);
+            float dist = Math.abs(i - cp);
+            float a = in * (1f - Math.min(1f, dist) * 0.55f) * (1f - dp);
+            if (a < 0.04f) {
+                x += labelPaint.measureText(cat.title) + 36 * scale;
+                continue;
+            }
+            boolean focus = dist < 0.45f;
+            labelPaint.setColor(textColor);
+            labelPaint.setAlpha((int) ((focus ? 255 : 140) * a));
+            softText(labelPaint, a * (focus ? 1f : 0.7f));
+            c.drawText(cat.title, x, y, labelPaint);
+            float tw = labelPaint.measureText(cat.title);
+            if (focus) {
+                paint.reset();
+                paint.setAntiAlias(true);
+                paint.setStyle(Paint.Style.FILL);
+                paint.setColor(focusAccent());
+                paint.setAlpha((int) (220 * a));
+                rect.set(x, y + 10 * scale, x + tw, y + 10 * scale + Math.max(3f, 3.5f * scale));
+                c.drawRect(rect, paint);
+            }
+            x += tw + 36 * scale;
+            if (x > w - 80 * scale) break;
+        }
+        labelPaint.setTypeface(old);
+        labelPaint.setTextSize(oldSize);
+        labelPaint.setTextAlign(oldAlign);
+    }
+
+    private void drawMetroTiles(Canvas c, float w, float h, List<Item> items, float selPos, float colAlpha,
+                                boolean values) {
+        if (colAlpha <= 0.01f || items == null) return;
+        float pulseP = press.cur;
+        float pulse = pulseP < 1f ? (float) Math.sin(Math.PI * pulseP) : 0f;
+        float left = 56 * scale;
+        float tileW = Math.min(w * 0.62f, 920 * scale) - rightInset;
+        float tileH = rowH * 0.88f;
+        float top = barY + 28 * scale;
+        float hintLvl = hintLevel();
+        for (int j = 0; j < items.size(); j++) {
+            Item it = items.get(j);
+            float rel = j - selPos;
+            float y = top + rel * (tileH + 10 * scale);
+            if (y + tileH < barY || y > h - 40 * scale) continue;
+            float near = Math.min(1f, Math.abs(rel));
+            float a = colAlpha * (1f - 0.18f * near);
+            if (hintLvl > 0f) {
+                float bf = Math.max(0f, Math.min(1f, (h - 160 * scale - y) / (tileH * 1.1f)));
+                a *= 1f - hintLvl * (1f - bf);
+            }
+            if (a <= 0.01f) continue;
+            boolean focus = near < 0.45f;
+            float lift = focus ? (4f * scale * (1f - near)) : 0f;
+            rect.set(left, y - lift, left + tileW, y - lift + tileH);
+
+            paint.reset();
+            paint.setAntiAlias(true);
+            paint.setStyle(Paint.Style.FILL);
+            if (focus) {
+                int fill = blend(accentColor(), 0xFF141A22, 0.55f);
+                paint.setColor((fill & 0x00FFFFFF) | ((int) (230 * a) << 24));
+                c.drawRoundRect(rect, 4 * scale, 4 * scale, paint);
+                // Accent leading edge — decisive 10-foot focus without neon glow.
+                paint.setColor(focusAccent());
+                paint.setAlpha((int) (255 * a));
+                c.drawRect(rect.left, rect.top, rect.left + Math.max(4f, 5f * scale), rect.bottom, paint);
+            } else {
+                paint.setColor((0xFF12161C & 0x00FFFFFF) | ((int) (160 * a) << 24));
+                c.drawRoundRect(rect, 4 * scale, 4 * scale, paint);
+            }
+
+            float iconCx = left + 28 * scale + iconSize * 0.28f;
+            float iconCy = y - lift + tileH * 0.5f;
+            float size = iconSize * 0.55f * (1f - 0.05f * pulse * (1f - near));
+            drawIcon(c, it, iconCx, iconCy, size, (int) (255 * a));
+
+            float tx = left + 28 * scale + iconSize * 0.7f;
+            float maxW = left + tileW - 28 * scale - tx;
+            boolean marker = values && (it.value != null || it.toggle >= 0 || it.submenu);
+            float valueX = left + tileW - 36 * scale;
+            if (marker) maxW = valueX - tx - 24 * scale;
+
+            titlePaint.setColor(textColor);
+            titlePaint.setAlpha((int) (255 * a));
+            softText(titlePaint, a);
+            String shown = it.title;
+            if (shown != null && shown.endsWith("...")) {
+                int dots = 1 + ((int) (animT * 2.5f)) % 3;
+                shown = shown.substring(0, shown.length() - 3) + "...".substring(0, dots);
+            }
+            String title = it.fitTitle(titlePaint, shown, maxW);
+            float ty = y - lift + tileH * 0.42f;
+            if (it.sub != null && !it.sub.isEmpty() && focus) ty = y - lift + tileH * 0.36f;
+            c.drawText(title, tx, ty, titlePaint);
+
+            if (focus && it.sub != null && !it.sub.isEmpty()) {
+                subPaint.setColor(textColor);
+                subPaint.setAlpha((int) (170 * a));
+                softText(subPaint, a * 0.85f);
+                String sub = it.fitSub(subPaint, it.sub, maxW);
+                c.drawText(sub, tx, ty + 26 * scale, subPaint);
+            }
+            if (values && it.value != null) {
+                valuePaint.setColor(textColor);
+                valuePaint.setAlpha((int) (220 * a));
+                softText(valuePaint, a);
+                valuePaint.setTextAlign(Paint.Align.RIGHT);
+                String v = it.fitValue(valuePaint, it.value, 220 * scale);
+                c.drawText(v, valueX, y - lift + tileH * 0.55f, valuePaint);
+                valuePaint.setTextAlign(Paint.Align.LEFT);
+            } else if (values && it.toggle >= 0) {
+                drawSwitch(c, valueX - 84 * scale, y - lift + tileH * 0.5f, it.toggle == 1, (int) (255 * a));
+            } else if (values && it.submenu) {
+                drawChevron(c, valueX - 12 * scale, y - lift + tileH * 0.5f, (int) (a * 0.85f * 255));
+            }
+        }
     }
 
     // ---- background

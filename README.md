@@ -1,8 +1,8 @@
 # TV Home
 
-Android TV launcher with a PlayStation-inspired Cross Media Bar, live TV guide, Multiview, and IPTV playback.
+Android TV launcher with a Metro-inspired home (default) or PlayStation-style Cross Media Bar, live TV guide, Multiview, and IPTV playback.
 
-Version **1.0.0**. Built and tested on a Hisense 55U8QG (Google TV, Android 14); it targets any Android TV / Google TV
+Version **1.1.0**. Built and tested on a Hisense 55U8QG (Google TV, Android 14); it targets any Android TV / Google TV
 device on Android 8 (API 26) or newer.
 
 ## Screenshots
@@ -29,9 +29,9 @@ device on Android 8 (API 26) or newer.
 
 ## What it does
 
-- **Cross Media Bar home screen** — categories across the bar, items beneath. Layout, colour themes and ribbon
-  background follow RetroArch's XMB menu. Categories: Favorites, Recent, Apps, Live, Calendar, Weather, Multiview,
-  Inputs, Settings.
+- **Home screen** — **Metro** layout by default (hub pivots + flat tiles on a dark plane), or classic **Cross Media Bar**
+  (RetroArch XMB). Switch under Settings → Home screen → Home layout. Categories: Favorites, Recent, Apps, Live,
+  Calendar, Weather, Multiview, Inputs, Settings.
 - **Live TV** — IPTV playlists (M3U), a TV guide, channel up/down, resume last channel.
 - **Multiview** — one to four live windows at once: HDMI inputs, web pages, IPTV channels, or widgets (clock,
   weather, calendar). Select a window for quick actions (Sound, Source, Full screen) that fade away when idle.
