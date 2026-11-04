@@ -1,0 +1,67 @@
+package com.liam.homescreen;
+
+import android.content.Context;
+import android.graphics.PixelFormat;
+import android.media.tv.TvContract;
+import android.media.tv.TvView;
+import android.provider.Settings;
+import android.util.DisplayMetrics;
+import android.view.Gravity;
+import android.view.WindowManager;
+import android.widget.FrameLayout;
+
+/** A small live input preview in a floating window, so it stays visible above other apps. */
+final class OverlayPreview {
+    private static FrameLayout container;
+    private static TvView tv;
+
+    private OverlayPreview() {
+    }
+
+    static boolean canUse(Context c) {
+        return Settings.canDrawOverlays(c);
+    }
+
+    static boolean isShowing() {
+        return container != null;
+    }
+
+    static void show(Context context, String inputId, int marginLeftPx, int marginBottomPx) {
+        if (container != null) hide();
+        Context app = context.getApplicationContext();
+        WindowManager wm = (WindowManager) app.getSystemService(Context.WINDOW_SERVICE);
+        DisplayMetrics dm = app.getResources().getDisplayMetrics();
+        int w = Math.round(dm.widthPixels * 0.27f);
+        int h = Math.round(w * 9f / 16f);
+
+        tv = new TvView(app);
+        tv.setZOrderOnTop(true);
+        tv.setStreamVolume(0f); // silent
+        container = new FrameLayout(app);
+        container.addView(tv, new FrameLayout.LayoutParams(w, h));
+
+        WindowManager.LayoutParams lp = new WindowManager.LayoutParams(w, h,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                        | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+                PixelFormat.TRANSLUCENT);
+        lp.gravity = Gravity.BOTTOM | Gravity.START;
+        lp.x = marginLeftPx;
+        lp.y = marginBottomPx;
+        wm.addView(container, lp);
+        tv.tune(inputId, TvContract.buildChannelUriForPassthroughInput(inputId));
+    }
+
+    static void hide() {
+        if (container == null) return;
+        try {
+            tv.reset();
+            ((WindowManager) container.getContext().getSystemService(Context.WINDOW_SERVICE)).removeView(container);
+        } catch (RuntimeException ignored) {
+            // window already gone
+        }
+        container = null;
+        tv = null;
+    }
+}

@@ -1,0 +1,27 @@
+{
+  "pluginAlias": "HisenseGoogleTV",
+  "pluginType": "platform",
+  "singular": true,
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": { "title": "Name", "type": "string", "default": "TV", "required": true },
+      "host": { "title": "TV IP address", "type": "string", "required": true, "description": "Give the TV a DHCP reservation so this never changes." },
+      "mac": { "title": "TV MAC address (optional)", "type": "string", "description": "Enables Wake-on-LAN for turning the TV on from full standby. Needs Wake on LAN/Wi-Fi enabled in the TV's settings." },
+      "inputs": {
+        "title": "Inputs",
+        "type": "array",
+        "description": "Leave empty for the defaults (Live TV, HDMI 1-3, YouTube, Netflix, Prime Video, Disney+).",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": { "title": "Name", "type": "string", "required": true },
+            "key": { "title": "Key (e.g. TV, TV_INPUT_HDMI_1)", "type": "string", "description": "Android key name without the KEYCODE_ prefix." },
+            "link": { "title": "App link (deep link URL)", "type": "string" },
+            "package": { "title": "App package (to detect it is active)", "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

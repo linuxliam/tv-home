@@ -1,0 +1,645 @@
+package com.liam.homescreen;
+
+import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.ColorFilter;
+import android.graphics.Paint;
+import android.graphics.Path;
+import android.graphics.PixelFormat;
+import android.graphics.RectF;
+import android.graphics.Typeface;
+import android.graphics.drawable.Drawable;
+import android.os.SystemClock;
+import android.text.TextPaint;
+import android.text.TextUtils;
+import android.view.View;
+
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+
+/**
+ * A cross media bar in the style of RetroArch's XMB menu (itself a PS3 XMB clone): categories
+ * across the bar, the selected category's items running down beneath it, previous items above the
+ * bar. Metrics, zoom/alpha factors, colour themes and the ribbon background follow RetroArch's
+ * menu/drivers/xmb.c; icons are white monochrome line art like its "monochrome" icon theme.
+ * Everything is drawn on one canvas.
+ */
+final class XmbView extends View {
+    static final int G_PLAY = 0, G_GRID = 1, G_INPUT = 2, G_GEAR = 3, G_PICTURE = 4,
+            G_SOUND = 5, G_WIFI = 6, G_MULTI = 7, G_PIN = 8, G_SUN = 9, G_CLOUD = 10, G_RAIN = 11,
+            G_SNOW = 12, G_STORM = 13, G_FOG = 14, G_CAL = 15, G_LIVE = 16;
+
+    static final class Item {
+        final String title;
+        final String sub;
+        final Drawable icon;
+        final Runnable action;
+        final Runnable longAction;
+
+        Item(String title, String sub, Drawable icon, Runnable action, Runnable longAction) {
+            this.title = title;
+            this.sub = sub;
+            this.icon = icon;
+            this.action = action;
+            this.longAction = longAction;
+        }
+    }
+
+    static final class Cat {
+        final String title;
+        final int glyph;
+        final List<Item> items = new ArrayList<>();
+        int sel;
+        float selPos;
+
+        Cat(String title, int glyph) {
+            this.title = title;
+            this.glyph = glyph;
+        }
+    }
+
+    // RetroArch colour themes: four corner colours (top-left, top-right, bottom-left, bottom-right).
+    private static final Map<String, int[]> THEMES = new HashMap<>();
+
+    static {
+        THEMES.put("electric_blue", new int[]{rgb(1, 2, 67), rgb(1, 73, 183), rgb(1, 93, 194), rgb(3, 162, 254)});
+        THEMES.put("dark_purple", new int[]{rgb(20, 13, 20), rgb(20, 13, 20), rgb(92, 44, 92), rgb(148, 90, 148)});
+        THEMES.put("midnight_blue", new int[]{rgb(44, 62, 80), rgb(44, 62, 80), rgb(44, 62, 80), rgb(44, 62, 80)});
+        THEMES.put("golden", new int[]{rgb(174, 123, 44), rgb(205, 174, 84), rgb(58, 43, 24), rgb(58, 43, 24)});
+        THEMES.put("legacy_red", new int[]{rgb(171, 70, 59), rgb(171, 70, 59), rgb(190, 80, 69), rgb(190, 80, 69)});
+        THEMES.put("apple_green", new int[]{rgb(102, 134, 58), rgb(122, 131, 52), rgb(82, 101, 35), rgb(63, 95, 30)});
+        THEMES.put("undersea", new int[]{rgb(23, 18, 41), rgb(30, 72, 114), rgb(52, 88, 110), rgb(69, 125, 140)});
+        THEMES.put("volcanic_red", new int[]{rgb(255, 0, 26), rgb(255, 26, 0), rgb(26, 0, 26), rgb(26, 0, 26)});
+        THEMES.put("dark", new int[]{rgb(13, 13, 13), rgb(13, 13, 13), rgb(13, 13, 13), rgb(13, 13, 13)});
+        THEMES.put("gray_dark", new int[]{rgb(16, 16, 16), rgb(16, 16, 16), rgb(16, 16, 16), rgb(16, 16, 16)});
+        THEMES.put("ice_cold", new int[]{rgb(66, 183, 229), rgb(29, 164, 255), rgb(176, 255, 247), rgb(174, 240, 255)});
+        THEMES.put("gamecube_purple", new int[]{rgb(40, 20, 91), rgb(160, 140, 211), rgb(107, 92, 177), rgb(84, 71, 132)});
+        THEMES.put("flaming_hot", new int[]{rgb(231, 53, 53), rgb(242, 138, 97), rgb(236, 97, 76), rgb(255, 125, 3)});
+        THEMES.put("pikachu_yellow", new int[]{rgb(63, 63, 1), rgb(174, 174, 1), rgb(191, 194, 1), rgb(254, 221, 3)});
+        THEMES.put("famicom_red", new int[]{rgb(255, 191, 171), rgb(119, 49, 28), rgb(148, 10, 36), rgb(206, 126, 110)});
+    }
+
+    private static int rgb(int r, int g, int b) {
+        return 0xFF000000 | (r << 16) | (g << 8) | b;
+    }
+
+    private final List<Cat> cats = new ArrayList<>();
+    private int catIndex;
+    private float catPos;
+    private final long start = SystemClock.uptimeMillis();
+
+    private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint bgPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
+    private final TextPaint titlePaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+    private final TextPaint subPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+    private final TextPaint labelPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+    private final TextPaint timePaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+    private final TextPaint smallPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+    private final RectF rect = new RectF();
+    private Bitmap background;
+    private String themeName = "electric_blue";
+    private int[] corners = THEMES.get("electric_blue");
+
+    private final SimpleDateFormat timeFmt = new SimpleDateFormat("h:mm a", Locale.getDefault());
+    private final SimpleDateFormat dateFmt = new SimpleDateFormat("EEEE d MMMM", Locale.getDefault());
+    private long clockStamp;
+    private String timeText = "";
+    private String dateText = "";
+    private int wGlyph = -1;
+    private String wTemp = "";
+    private String wDesc = "";
+
+    // ribbon mesh
+    private static final int RIB_ROWS = 26;
+    private static final int RIB_COLS = 44;
+    private final float[][] ribX = new float[RIB_ROWS + 1][RIB_COLS + 1];
+    private final float[][] ribY = new float[RIB_ROWS + 1][RIB_COLS + 1];
+    private final Path[] ribBuckets = new Path[5];
+
+    // layout (RetroArch PS3 layout, scaled): set in onSizeChanged
+    private float scale, iconSize, spacingH, rowH, barY, anchorX;
+
+    XmbView(Context c) {
+        super(c);
+        Typeface sans = Typeface.create("sans-serif", Typeface.NORMAL);
+        Typeface medium = Typeface.create("sans-serif-medium", Typeface.NORMAL);
+        titlePaint.setTypeface(medium);
+        subPaint.setTypeface(sans);
+        labelPaint.setTypeface(medium);
+        timePaint.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
+        smallPaint.setTypeface(sans);
+        labelPaint.setTextAlign(Paint.Align.CENTER);
+        timePaint.setTextAlign(Paint.Align.RIGHT);
+        smallPaint.setTextAlign(Paint.Align.RIGHT);
+        for (int i = 0; i < ribBuckets.length; i++) ribBuckets[i] = new Path();
+        setFocusable(false);
+        rebuildBackground();
+    }
+
+    // ------------------------------------------------------------------ data & navigation
+
+    /** One of RetroArch's colour themes, e.g. "electric_blue" (default), "dark_purple", "golden". */
+    void setTheme(String name) {
+        String key = name == null ? "electric_blue" : name.trim().toLowerCase(Locale.ROOT).replace(' ', '_');
+        if (!THEMES.containsKey(key)) key = "electric_blue";
+        if (key.equals(themeName) && background != null) return;
+        themeName = key;
+        corners = THEMES.get(key);
+        rebuildBackground();
+    }
+
+    private void rebuildBackground() {
+        int bw = 64;
+        int bh = 36;
+        Bitmap b = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888);
+        for (int y = 0; y < bh; y++) {
+            float ty = y / (bh - 1f);
+            for (int x = 0; x < bw; x++) {
+                float tx = x / (bw - 1f);
+                b.setPixel(x, y, lerp(lerp(corners[0], corners[1], tx), lerp(corners[2], corners[3], tx), ty));
+            }
+        }
+        background = b;
+    }
+
+    private static int lerp(int a, int b, float t) {
+        int r = (int) (((a >> 16) & 255) * (1 - t) + ((b >> 16) & 255) * t);
+        int g = (int) (((a >> 8) & 255) * (1 - t) + ((b >> 8) & 255) * t);
+        int bl = (int) ((a & 255) * (1 - t) + (b & 255) * t);
+        return 0xFF000000 | (r << 16) | (g << 8) | bl;
+    }
+
+    void setCategories(List<Cat> fresh) {
+        Map<String, Integer> sels = new HashMap<>();
+        String current = catIndex < cats.size() ? cats.get(catIndex).title : null;
+        for (Cat old : cats) sels.put(old.title, old.sel);
+        cats.clear();
+        cats.addAll(fresh);
+        for (Cat c : cats) {
+            Integer s = sels.get(c.title);
+            c.sel = s == null ? 0 : Math.max(0, Math.min(s, c.items.size() - 1));
+            c.selPos = c.sel;
+        }
+        for (int i = 0; i < cats.size(); i++) if (cats.get(i).title.equals(current)) catIndex = i;
+        catIndex = Math.max(0, Math.min(catIndex, cats.size() - 1));
+    }
+
+    /** Shown beside the clock. Pass a negative glyph to hide it. */
+    void setWeather(int glyph, String temp, String desc) {
+        wGlyph = glyph;
+        wTemp = temp == null ? "" : temp;
+        wDesc = desc == null ? "" : desc;
+    }
+
+    void moveCat(int dir) {
+        if (cats.isEmpty()) return;
+        catIndex = Math.max(0, Math.min(cats.size() - 1, catIndex + dir));
+    }
+
+    void moveItem(int dir) {
+        if (cats.isEmpty()) return;
+        Cat c = cats.get(catIndex);
+        c.sel = Math.max(0, Math.min(c.items.size() - 1, c.sel + dir));
+    }
+
+    void goHome() {
+        if (cats.isEmpty()) return;
+        catIndex = 0;
+        for (Cat c : cats) c.sel = 0;
+    }
+
+    void activate() {
+        Item it = current();
+        if (it != null && it.action != null) it.action.run();
+    }
+
+    void longActivate() {
+        Item it = current();
+        if (it != null && it.longAction != null) it.longAction.run();
+    }
+
+    private Item current() {
+        if (cats.isEmpty()) return null;
+        Cat c = cats.get(catIndex);
+        return c.items.isEmpty() ? null : c.items.get(c.sel);
+    }
+
+    // ------------------------------------------------------------------ drawing
+
+    @Override
+    protected void onSizeChanged(int w, int h, int ow, int oh) {
+        // RetroArch's PS3 layout is defined for a 1080p screen at menu scale 1.0; use 0.8 for TV distance.
+        scale = h / 1080f * 0.8f;
+        iconSize = 128 * scale;
+        spacingH = 192 * scale;
+        rowH = 64 * scale;
+        barY = 272 * scale;
+        anchorX = 336 * scale;
+        titlePaint.setTextSize(40 * scale);
+        subPaint.setTextSize(30 * scale);
+        labelPaint.setTextSize(34 * scale);
+        timePaint.setTextSize(50 * scale);
+        smallPaint.setTextSize(28 * scale);
+    }
+
+    @Override
+    protected void onDraw(Canvas c) {
+        float w = getWidth();
+        float h = getHeight();
+        float t = (SystemClock.uptimeMillis() - start) / 1000f;
+
+        catPos += (catIndex - catPos) * 0.2f;
+        if (Math.abs(catIndex - catPos) < 0.002f) catPos = catIndex;
+        for (Cat cat : cats) {
+            cat.selPos += (cat.sel - cat.selPos) * 0.25f;
+            if (Math.abs(cat.sel - cat.selPos) < 0.002f) cat.selPos = cat.sel;
+        }
+
+        rect.set(0, 0, w, h);
+        c.drawBitmap(background, null, rect, bgPaint);
+        drawRibbon(c, w, h, t);
+        drawItems(c, w, h);
+        drawBar(c, w, h);
+        drawClock(c, w, h);
+        postInvalidateOnAnimation();
+    }
+
+    /**
+     * RetroArch's ribbon: a mesh whose vertices are displaced by
+     * y = cos(z*4)*cos(z + t/10 + x)/8 - noise/15 - cos(2x - t/2)/5 + 0.3, lit so that stretched
+     * areas stay dark and compressed (steep) areas catch light. Approximated here with a cheap noise
+     * and a white sheen whose strength follows how squeezed each cell is.
+     */
+    private void drawRibbon(Canvas c, float w, float h, float t) {
+        for (int r = 0; r <= RIB_ROWS; r++) {
+            float vz = -1f + 2f * r / RIB_ROWS;
+            for (int k = 0; k <= RIB_COLS; k++) {
+                float vx = -1f + 2f * k / RIB_COLS;
+                float base = (float) (Math.cos(vz * 4) * Math.cos(vz + t / 10f + vx) / 8f);
+                float n = (float) (Math.sin(vx * 2.1f - t * 0.22f + vz) + Math.sin(vz * 3.3f + vx * 1.3f + t * 0.17f)) * 0.5f;
+                float vy = base - n / 15f - (float) Math.cos(vx * 2f - t / 2f) / 5f + 0.3f;
+                ribX[r][k] = (vx + 1f) * 0.5f * w;
+                ribY[r][k] = h * (0.5f + vy * 0.95f);
+            }
+        }
+        for (Path p : ribBuckets) p.reset();
+        float avgGap = h * 0.5f / RIB_ROWS;
+        for (int r = 0; r < RIB_ROWS; r++) {
+            for (int k = 0; k < RIB_COLS; k++) {
+                float gap = Math.abs((ribY[r + 1][k] - ribY[r][k] + ribY[r + 1][k + 1] - ribY[r][k + 1]) * 0.5f);
+                float b = Math.max(0f, Math.min(1f, 1.35f - gap / avgGap));
+                int bucket = (int) (b * ribBuckets.length);
+                if (bucket <= 0) continue;
+                Path p = ribBuckets[Math.min(bucket, ribBuckets.length) - 1];
+                p.moveTo(ribX[r][k], ribY[r][k]);
+                p.lineTo(ribX[r][k + 1], ribY[r][k + 1]);
+                p.lineTo(ribX[r + 1][k + 1], ribY[r + 1][k + 1]);
+                p.lineTo(ribX[r + 1][k], ribY[r + 1][k]);
+                p.close();
+            }
+        }
+        paint.reset();
+        paint.setAntiAlias(true);
+        for (int i = 0; i < ribBuckets.length; i++) {
+            paint.setColor(0xFFFFFFFF);
+            paint.setAlpha(14 + 13 * i);
+            c.drawPath(ribBuckets[i], paint);
+        }
+    }
+
+    private void drawClock(Canvas c, float w, float h) {
+        long now = System.currentTimeMillis();
+        if (now - clockStamp > 1000) {
+            clockStamp = now;
+            timeText = timeFmt.format(now);
+            dateText = dateFmt.format(now);
+        }
+        float right = w - 60 * scale;
+        timePaint.setColor(0xFFFFFFFF);
+        timePaint.setShadowLayer(1f, 3 * scale, 3 * scale, 0x99000000);
+        c.drawText(timeText, right, 96 * scale, timePaint);
+        smallPaint.setColor(0xCCFFFFFF);
+        smallPaint.setShadowLayer(1f, 2 * scale, 2 * scale, 0x99000000);
+        c.drawText(dateText, right, 96 * scale + 40 * scale, smallPaint);
+
+        if (wGlyph >= 0) { // weather, to the left of the clock
+            float rightEdge = right - Math.max(timePaint.measureText(timeText), smallPaint.measureText(dateText)) - 80 * scale;
+            smallPaint.setColor(0xFFFFFFFF);
+            c.drawText(wTemp, rightEdge, 82 * scale, smallPaint);
+            smallPaint.setColor(0xCCFFFFFF);
+            c.drawText(wDesc, rightEdge, 82 * scale + 38 * scale, smallPaint);
+            float gs = 78 * scale;
+            float gx = rightEdge - Math.max(smallPaint.measureText(wTemp), smallPaint.measureText(wDesc)) - 24 * scale - gs / 2;
+            paint.reset();
+            paint.setAntiAlias(true);
+            drawGlyph(c, wGlyph, gx, 100 * scale, gs, 0xFFFFFFFF, 255, paint);
+        }
+    }
+
+    private void drawBar(Canvas c, float w, float h) {
+        for (int i = 0; i < cats.size(); i++) {
+            Cat cat = cats.get(i);
+            float dx = i - catPos;
+            float dist = Math.min(1f, Math.abs(dx));
+            float x = anchorX + dx * spacingH;
+            float zoom = 1f - 0.5f * dist;          // active 1.0, passive 0.5
+            float alpha = 1f - 0.25f * dist;        // active 1.0, passive 0.75
+            paint.reset();
+            paint.setAntiAlias(true);
+            drawGlyph(c, cat.glyph, x, barY, iconSize * zoom, 0xFFFFFFFF, (int) (255 * alpha), paint);
+
+            float la = Math.max(0f, 1f - Math.abs(dx) * 1.5f);
+            if (la > 0f) {
+                labelPaint.setColor(0xFFFFFFFF);
+                labelPaint.setAlpha((int) (255 * la));
+                labelPaint.setShadowLayer(1f, 3 * scale, 3 * scale, ((int) (0x99 * la) << 24));
+                c.drawText(cat.title, x, barY + iconSize * 0.5f + 44 * scale, labelPaint);
+            }
+        }
+    }
+
+    /**
+     * Row offset (in rows below the bar) of an item at 'rel' places from the selection, following
+     * RetroArch: previous items sit above the bar, the selected one three rows below it, and the next
+     * one two rows further to leave room for the selected item's sub-label.
+     */
+    private static float rows(float rel) {
+        if (rel <= -1f) return -2f + (rel + 1f);
+        if (rel <= 0f) return -2f + (rel + 1f) * 5f;   // slides from above the bar down to the active slot
+        if (rel <= 1f) return 3f + rel * 2f;          // active slot to the next item
+        return 5f + (rel - 1f);
+    }
+
+    private void drawItems(Canvas c, float w, float h) {
+        for (int i = 0; i < cats.size(); i++) {
+            Cat cat = cats.get(i);
+            float dx = i - catPos;
+            if (Math.abs(dx) >= 1f) continue;
+            float catAlpha = 1f - Math.abs(dx);
+            float x = anchorX + dx * spacingH;
+            for (int j = 0; j < cat.items.size(); j++) {
+                Item it = cat.items.get(j);
+                float rel = j - cat.selPos;
+                float y = barY + rows(rel) * rowH;
+                if (y < -rowH || y > h + rowH) continue;
+                float near = Math.min(1f, Math.abs(rel));
+                float zoom = 1f - 0.5f * near;
+                float a = catAlpha * (1f - 0.25f * near);
+                // fade out towards the top edge, and while an item slides past the icon bar
+                a *= Math.max(0f, Math.min(1f, y / (rowH * 2f)));
+                float fromBar = Math.abs(y - barY) / (rowH * 1.4f);
+                if (fromBar < 1f && rel != 0f) a *= fromBar * fromBar;
+                if (a <= 0.01f) continue;
+                int alpha = (int) (255 * a);
+
+                float size = iconSize * 0.75f * zoom;
+                if (it.icon != null) {
+                    it.icon.setBounds((int) (x - size / 2), (int) (y - size / 2), (int) (x + size / 2), (int) (y + size / 2));
+                    it.icon.setAlpha(alpha);
+                    it.icon.draw(c);
+                }
+                float tx = x + iconSize * 0.42f + 20 * scale;
+                float maxW = w - tx - 80 * scale;
+                titlePaint.setColor(0xFFFFFFFF);
+                titlePaint.setAlpha(alpha);
+                titlePaint.setShadowLayer(1f, 3 * scale, 3 * scale, ((int) (0x99 * a) << 24));
+                String title = TextUtils.ellipsize(it.title, titlePaint, maxW, TextUtils.TruncateAt.END).toString();
+                c.drawText(title, tx, y + titlePaint.getTextSize() * 0.34f, titlePaint);
+                if (rel > -0.5f && rel < 0.5f && it.sub != null && !it.sub.isEmpty()) {
+                    float sa = a * (1f - Math.abs(rel) * 2f);
+                    subPaint.setColor(0xFFFFFFFF);
+                    subPaint.setAlpha((int) (200 * sa));
+                    subPaint.setShadowLayer(1f, 2 * scale, 2 * scale, ((int) (0x80 * sa) << 24));
+                    String sub = TextUtils.ellipsize(it.sub, subPaint, maxW, TextUtils.TruncateAt.END).toString();
+                    c.drawText(sub, tx, y + rowH * 0.95f + subPaint.getTextSize() * 0.2f, subPaint);
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ glyphs
+
+    /** White line icons, like RetroArch's monochrome set: thin 2/64 strokes, shapes inside a round grid. */
+    static void drawGlyph(Canvas c, int g, float cx, float cy, float s, int color, int alpha, Paint p) {
+        p.setStyle(Paint.Style.STROKE);
+        p.setStrokeWidth(Math.max(2f, s * 0.05f));
+        p.setStrokeCap(Paint.Cap.ROUND);
+        p.setStrokeJoin(Paint.Join.ROUND);
+        p.setColor(color);
+        p.setAlpha(alpha);
+        p.setShadowLayer(1f, s * 0.025f, s * 0.025f, ((int) (0x66 * alpha / 255f) << 24));
+        float h = s / 2f * 0.9f;
+        RectF r = new RectF();
+        Path path = new Path();
+        switch (g) {
+            case G_PLAY:
+                r.set(cx - h, cy - h * 0.75f, cx + h, cy + h * 0.75f);
+                c.drawRoundRect(r, s * 0.1f, s * 0.1f, p);
+                p.setStyle(Paint.Style.FILL);
+                path.moveTo(cx - h * 0.25f, cy - h * 0.38f);
+                path.lineTo(cx + h * 0.38f, cy);
+                path.lineTo(cx - h * 0.25f, cy + h * 0.38f);
+                path.close();
+                c.drawPath(path, p);
+                break;
+            case G_GRID: {
+                float q = s * 0.34f;
+                float gap = s * 0.1f;
+                for (int row = 0; row < 2; row++) {
+                    for (int col = 0; col < 2; col++) {
+                        float l = cx - q - gap / 2 + col * (q + gap);
+                        float tp = cy - q - gap / 2 + row * (q + gap);
+                        r.set(l, tp, l + q, tp + q);
+                        c.drawRoundRect(r, s * 0.06f, s * 0.06f, p);
+                    }
+                }
+                break;
+            }
+            case G_MULTI: {
+                float q = s * 0.34f;
+                float gap = s * 0.1f;
+                for (int row = 0; row < 2; row++) {
+                    for (int col = 0; col < 2; col++) {
+                        float l = cx - q - gap / 2 + col * (q + gap);
+                        float tp = cy - q - gap / 2 + row * (q + gap);
+                        r.set(l, tp, l + q, tp + q);
+                        p.setStyle(row == 0 && col == 0 ? Paint.Style.FILL : Paint.Style.STROKE);
+                        c.drawRoundRect(r, s * 0.06f, s * 0.06f, p);
+                    }
+                }
+                break;
+            }
+            case G_INPUT:
+                r.set(cx - h, cy - h * 0.62f, cx + h, cy + h * 0.32f);
+                c.drawRoundRect(r, s * 0.06f, s * 0.06f, p);
+                c.drawLine(cx, cy + h * 0.32f, cx, cy + h * 0.7f, p);
+                c.drawLine(cx - h * 0.45f, cy + h * 0.7f, cx + h * 0.45f, cy + h * 0.7f, p);
+                break;
+            case G_GEAR:
+                c.drawCircle(cx, cy, h * 0.46f, p);
+                c.drawCircle(cx, cy, h * 0.2f, p);
+                for (int k = 0; k < 8; k++) {
+                    double a = k * Math.PI / 4;
+                    c.drawLine(cx + (float) Math.cos(a) * h * 0.62f, cy + (float) Math.sin(a) * h * 0.62f,
+                            cx + (float) Math.cos(a) * h * 0.92f, cy + (float) Math.sin(a) * h * 0.92f, p);
+                }
+                break;
+            case G_PICTURE:
+                r.set(cx - h, cy - h * 0.72f, cx + h, cy + h * 0.72f);
+                c.drawRoundRect(r, s * 0.06f, s * 0.06f, p);
+                path.moveTo(cx - h * 0.8f, cy + h * 0.5f);
+                path.lineTo(cx - h * 0.2f, cy - h * 0.1f);
+                path.lineTo(cx + h * 0.15f, cy + h * 0.3f);
+                path.lineTo(cx + h * 0.4f, cy + h * 0.05f);
+                path.lineTo(cx + h * 0.8f, cy + h * 0.5f);
+                c.drawPath(path, p);
+                c.drawCircle(cx + h * 0.45f, cy - h * 0.35f, h * 0.15f, p);
+                break;
+            case G_SOUND:
+                path.moveTo(cx - h * 0.9f, cy - h * 0.3f);
+                path.lineTo(cx - h * 0.5f, cy - h * 0.3f);
+                path.lineTo(cx - h * 0.1f, cy - h * 0.7f);
+                path.lineTo(cx - h * 0.1f, cy + h * 0.7f);
+                path.lineTo(cx - h * 0.5f, cy + h * 0.3f);
+                path.lineTo(cx - h * 0.9f, cy + h * 0.3f);
+                path.close();
+                c.drawPath(path, p);
+                for (int k = 1; k <= 2; k++) {
+                    float rad = h * (0.3f + 0.4f * k);
+                    r.set(cx - h * 0.1f - rad, cy - rad, cx - h * 0.1f + rad, cy + rad);
+                    c.drawArc(r, -40, 80, false, p);
+                }
+                break;
+            case G_WIFI: {
+                float oy = cy + h * 0.55f;
+                for (int k = 1; k <= 3; k++) {
+                    float rad = h * 0.5f * k;
+                    r.set(cx - rad, oy - rad, cx + rad, oy + rad);
+                    c.drawArc(r, -135, 90, false, p);
+                }
+                p.setStyle(Paint.Style.FILL);
+                c.drawCircle(cx, oy, h * 0.1f, p);
+                break;
+            }
+            case G_SUN:
+                c.drawCircle(cx, cy, h * 0.38f, p);
+                for (int k = 0; k < 8; k++) {
+                    double a = k * Math.PI / 4;
+                    c.drawLine(cx + (float) Math.cos(a) * h * 0.58f, cy + (float) Math.sin(a) * h * 0.58f,
+                            cx + (float) Math.cos(a) * h * 0.88f, cy + (float) Math.sin(a) * h * 0.88f, p);
+                }
+                break;
+            case G_CLOUD:
+                cloud(c, cx, cy, h, p);
+                break;
+            case G_RAIN:
+                cloud(c, cx, cy - h * 0.25f, h, p);
+                for (int k = -1; k <= 1; k++) {
+                    c.drawLine(cx + k * h * 0.4f, cy + h * 0.35f, cx + k * h * 0.4f - h * 0.12f, cy + h * 0.75f, p);
+                }
+                break;
+            case G_SNOW:
+                cloud(c, cx, cy - h * 0.25f, h, p);
+                p.setStyle(Paint.Style.FILL);
+                for (int k = -1; k <= 1; k++) c.drawCircle(cx + k * h * 0.4f, cy + h * 0.58f, h * 0.07f, p);
+                break;
+            case G_STORM:
+                cloud(c, cx, cy - h * 0.25f, h, p);
+                path.moveTo(cx + h * 0.05f, cy + h * 0.25f);
+                path.lineTo(cx - h * 0.2f, cy + h * 0.6f);
+                path.lineTo(cx + h * 0.1f, cy + h * 0.6f);
+                path.lineTo(cx - h * 0.1f, cy + h * 0.95f);
+                c.drawPath(path, p);
+                break;
+            case G_FOG:
+                for (int k = -1; k <= 1; k++) {
+                    c.drawLine(cx - h * 0.8f + Math.abs(k) * h * 0.1f, cy + k * h * 0.4f,
+                            cx + h * 0.8f - Math.abs(k) * h * 0.1f, cy + k * h * 0.4f, p);
+                }
+                break;
+            case G_CAL:
+                r.set(cx - h * 0.85f, cy - h * 0.7f, cx + h * 0.85f, cy + h * 0.85f);
+                c.drawRoundRect(r, s * 0.08f, s * 0.08f, p);
+                c.drawLine(cx - h * 0.85f, cy - h * 0.25f, cx + h * 0.85f, cy - h * 0.25f, p);
+                c.drawLine(cx - h * 0.4f, cy - h * 0.95f, cx - h * 0.4f, cy - h * 0.5f, p);
+                c.drawLine(cx + h * 0.4f, cy - h * 0.95f, cx + h * 0.4f, cy - h * 0.5f, p);
+                p.setStyle(Paint.Style.FILL);
+                for (int row = 0; row < 2; row++) {
+                    for (int col = -1; col <= 1; col++) {
+                        c.drawCircle(cx + col * h * 0.45f, cy + h * 0.1f + row * h * 0.4f, h * 0.07f, p);
+                    }
+                }
+                break;
+            case G_LIVE:
+                p.setStyle(Paint.Style.FILL);
+                c.drawCircle(cx, cy, h * 0.14f, p);
+                p.setStyle(Paint.Style.STROKE);
+                for (int k = 1; k <= 3; k++) {
+                    float rad = h * 0.32f * k;
+                    r.set(cx - rad, cy - rad, cx + rad, cy + rad);
+                    c.drawArc(r, -50, 100, false, p);
+                    c.drawArc(r, 130, 100, false, p);
+                }
+                break;
+            case G_PIN:
+                c.drawCircle(cx, cy - h * 0.3f, h * 0.45f, p);
+                c.drawLine(cx, cy + h * 0.15f, cx, cy + h * 0.9f, p);
+                break;
+            default:
+                break;
+        }
+    }
+
+    private static void cloud(Canvas c, float cx, float cy, float h, Paint p) {
+        Path a = new Path();
+        a.addCircle(cx - h * 0.4f, cy + h * 0.1f, h * 0.35f, Path.Direction.CW);
+        Path b = new Path();
+        b.addCircle(cx + h * 0.05f, cy - h * 0.2f, h * 0.5f, Path.Direction.CW);
+        a.op(b, Path.Op.UNION);
+        Path e = new Path();
+        e.addCircle(cx + h * 0.5f, cy + h * 0.1f, h * 0.32f, Path.Direction.CW);
+        a.op(e, Path.Op.UNION);
+        Path base = new Path();
+        base.addRect(cx - h * 0.4f, cy + h * 0.1f, cx + h * 0.5f, cy + h * 0.42f, Path.Direction.CW);
+        a.op(base, Path.Op.UNION);
+        c.drawPath(a, p);
+    }
+
+    /** Small glyph usable as an item icon (always white, like RetroArch's monochrome icons). */
+    static final class GlyphDrawable extends Drawable {
+        private final int glyph;
+        private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private int alpha = 255;
+
+        GlyphDrawable(int glyph, int ignoredColor) {
+            this.glyph = glyph;
+        }
+
+        @Override
+        public void draw(Canvas c) {
+            p.reset();
+            p.setAntiAlias(true);
+            float s = Math.min(getBounds().width(), getBounds().height());
+            drawGlyph(c, glyph, getBounds().exactCenterX(), getBounds().exactCenterY(), s * 0.95f, 0xFFFFFFFF, alpha, p);
+        }
+
+        @Override
+        public void setAlpha(int a) {
+            alpha = a;
+        }
+
+        @Override
+        public void setColorFilter(ColorFilter cf) {
+        }
+
+        @Override
+        public int getOpacity() {
+            return PixelFormat.TRANSLUCENT;
+        }
+    }
+}

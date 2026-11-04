@@ -1,0 +1,129 @@
+package com.liam.homescreen;
+
+import android.app.Activity;
+import android.graphics.Color;
+import android.graphics.Typeface;
+import android.media.MediaPlayer;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.net.Uri;
+import android.view.Gravity;
+import android.view.KeyEvent;
+import android.view.WindowManager;
+import android.widget.FrameLayout;
+import android.widget.TextView;
+import android.widget.VideoView;
+
+import java.util.List;
+
+/** Full screen IPTV player. Up/Down change channel, Back returns to the home screen. */
+public class PlayerActivity extends Activity {
+    // Set by the launcher before starting this activity.
+    static List<IptvPlaylist.Channel> channels;
+    static int startIndex;
+
+    private VideoView video;
+    private TextView info;
+    private TextView status;
+    private int index;
+    private final Handler ui = new Handler(Looper.getMainLooper());
+    private final Runnable hideInfo = new Runnable() {
+        @Override
+        public void run() {
+            info.setVisibility(TextView.GONE);
+        }
+    };
+
+    @Override
+    protected void onCreate(Bundle state) {
+        super.onCreate(state);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        index = startIndex;
+
+        FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(Color.BLACK);
+        video = new VideoView(this);
+        root.addView(video, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
+
+        info = new TextView(this);
+        info.setTextColor(Color.WHITE);
+        info.setTextSize(22);
+        info.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        info.setShadowLayer(8, 0, 0, 0xFF00E5FF);
+        info.setPadding(60, 40, 60, 20);
+        root.addView(info, new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.START));
+
+        status = new TextView(this);
+        status.setTextColor(0xFFFF9BEA);
+        status.setTextSize(18);
+        status.setTypeface(Typeface.MONOSPACE);
+        root.addView(status, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER));
+        setContentView(root);
+
+        video.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
+            @Override
+            public void onPrepared(MediaPlayer mp) {
+                status.setText("");
+                mp.start();
+            }
+        });
+        video.setOnErrorListener(new MediaPlayer.OnErrorListener() {
+            @Override
+            public boolean onError(MediaPlayer mp, int what, int extra) {
+                status.setText("This channel won't play.\nPress Up or Down for another.");
+                return true;
+            }
+        });
+        play();
+    }
+
+    private void play() {
+        if (channels == null || channels.isEmpty()) {
+            finish();
+            return;
+        }
+        index = (index + channels.size()) % channels.size();
+        IptvPlaylist.Channel ch = channels.get(index);
+        getSharedPreferences("home", MODE_PRIVATE).edit()
+                .putString("last_channel_url", ch.url).putString("last_channel_name", ch.name).apply();
+        status.setText("Loading...");
+        info.setText((index + 1) + "  " + ch.name + "\n" + ch.group);
+        info.setVisibility(TextView.VISIBLE);
+        ui.removeCallbacks(hideInfo);
+        ui.postDelayed(hideInfo, 4000);
+        video.stopPlayback();
+        video.setVideoURI(Uri.parse(ch.url));
+    }
+
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        switch (keyCode) {
+            case KeyEvent.KEYCODE_DPAD_UP:
+            case KeyEvent.KEYCODE_CHANNEL_UP:
+                index--;
+                play();
+                return true;
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+            case KeyEvent.KEYCODE_CHANNEL_DOWN:
+                index++;
+                play();
+                return true;
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+            case KeyEvent.KEYCODE_ENTER:
+                info.setVisibility(TextView.VISIBLE);
+                ui.removeCallbacks(hideInfo);
+                ui.postDelayed(hideInfo, 4000);
+                return true;
+            default:
+                return super.onKeyDown(keyCode, event);
+        }
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        video.stopPlayback();
+        finish();
+    }
+}

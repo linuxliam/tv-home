@@ -1,0 +1,26 @@
+{
+  "name": "homebridge-hisense-googletv",
+  "displayName": "Hisense Google TV (Local)",
+  "version": "0.1.0",
+  "description": "Local-network HomeKit control for Hisense Google TV / Android TV via the Android TV Remote protocol. No cloud or Google account involved.",
+  "main": "index.js",
+  "license": "MIT",
+  "private": true,
+  "engines": {
+    "node": ">=18",
+    "homebridge": ">=1.6.0"
+  },
+  "keywords": [
+    "homebridge-plugin",
+    "hisense",
+    "google-tv",
+    "android-tv",
+    "television"
+  ],
+  "dependencies": {
+    "androidtv-remote": "^1.0.10"
+  },
+  "devDependencies": {
+    "homebridge": "^2.4.0"
+  }
+}

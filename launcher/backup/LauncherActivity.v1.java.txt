@@ -1,0 +1,687 @@
+package com.liam.homescreen;
+
+import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.ComponentName;
+import android.content.Context;
+import android.content.DialogInterface;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
+import android.graphics.drawable.Drawable;
+import android.media.tv.TvContract;
+import android.media.tv.TvInputInfo;
+import android.media.tv.TvInputManager;
+import android.net.Uri;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.provider.Settings;
+import android.view.KeyEvent;
+import android.widget.Toast;
+
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Calendar;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Date;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+/**
+ * Home screen in the style of the PS3 cross media bar. Left/Right change category, Up/Down move
+ * through the items, OK opens, holding OK shows the item's extra action (pin an input, app info).
+ */
+public class LauncherActivity extends Activity {
+    // Shown first (in the Watch category), in this order. Everything else is in Apps, alphabetically.
+    private static final String[] PINNED = {
+            "com.google.android.youtube.tv",
+            "com.netflix.ninja",
+            "com.amazon.amazonvideo.livingroom",
+            "com.disney.disneyplus",
+            "com.apple.atve.androidtv.appletv",
+            "com.plexapp.android",
+            "com.vt.tv.tvcenter",
+    };
+    private static final String SETTINGS = "com.android.tv.settings";
+    // Hisense system apps hidden from the lists (prefix match), except the ones allowed below.
+    private static final String HIDDEN_PREFIX = "com.vt.";
+    private static final String[] ALLOWED_VT = {"com.vt.tv.tvcenter"};
+
+    private static final String PREF_CORNER = "corner_input";
+    private static final String DEFAULT_CORNER_NAME = "Apple TV"; // preview input pinned on first run
+
+    private static final long WEATHER_EVERY_MS = 15 * 60 * 1000L;
+    private static final long CALENDAR_EVERY_MS = 10 * 60 * 1000L;
+    private static final long IPTV_EVERY_MS = 6 * 60 * 60 * 1000L;
+    private static final int CALENDAR_DAYS = 14;
+
+    private static final int NEON_CYAN = 0xFF00E5FF;
+    private static final int NEON_MAGENTA = 0xFFFF2BD6;
+    private static final int NEON_YELLOW = 0xFFFFE600;
+    private static final int NEON_GREEN = 0xFF39FF88;
+
+    private XmbView xmb;
+    private SharedPreferences prefs;
+    private Config config;
+    private String configPrint = "";
+    private TvInputManager tvInputs;
+    private final Handler ui = new Handler(Looper.getMainLooper());
+    private final ExecutorService io = Executors.newSingleThreadExecutor();
+    private final TvInputManager.TvInputCallback inputCallback = new TvInputManager.TvInputCallback() {
+        @Override
+        public void onInputStateChanged(String inputId, int state) {
+            reload();
+        }
+
+        @Override
+        public void onInputAdded(String inputId) {
+            reload();
+        }
+
+        @Override
+        public void onInputRemoved(String inputId) {
+            reload();
+        }
+    };
+
+    // Fetched data, kept between refreshes
+    private WeatherClient.Report weather;
+    private String weatherError;
+    private long weatherAt;
+    private List<IcsCalendar.Event> events = new ArrayList<>();
+    private boolean calendarLoaded;
+    private long calendarAt;
+    private List<IptvPlaylist.Channel> channels = new ArrayList<>();
+    private String iptvError;
+    private long iptvAt;
+
+    @Override
+    protected void onCreate(Bundle state) {
+        super.onCreate(state);
+        prefs = getSharedPreferences("home", MODE_PRIVATE);
+        xmb = new XmbView(this);
+        setContentView(xmb);
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        tvInputs = (TvInputManager) getSystemService(Context.TV_INPUT_SERVICE);
+        if (tvInputs != null) tvInputs.registerCallback(inputCallback, ui);
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        if (tvInputs != null) tvInputs.unregisterCallback(inputCallback);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        config = new Config(this);
+        xmb.setTheme(config.get("theme", "electric_blue"));
+        boolean changed = !config.fingerprint().equals(configPrint);
+        configPrint = config.fingerprint();
+        refreshData(changed);
+        reload();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        io.shutdownNow();
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        xmb.goHome(); // Home pressed while already here: back to the start
+    }
+
+    @Override
+    public void onBackPressed() {
+        // This is the home screen; Back only closes the floating input preview.
+        if (OverlayPreview.isShowing()) OverlayPreview.hide();
+    }
+
+    // ---------------------------------------------------------------- Remote keys
+
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        switch (keyCode) {
+            case KeyEvent.KEYCODE_DPAD_LEFT:
+                xmb.moveCat(-1);
+                return true;
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
+                xmb.moveCat(1);
+                return true;
+            case KeyEvent.KEYCODE_DPAD_UP:
+                xmb.moveItem(-1);
+                return true;
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+                xmb.moveItem(1);
+                return true;
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+            case KeyEvent.KEYCODE_ENTER:
+                event.startTracking(); // so a long press can be told apart from a press
+                return true;
+            default:
+                return super.onKeyDown(keyCode, event);
+        }
+    }
+
+    @Override
+    public boolean onKeyUp(int keyCode, KeyEvent event) {
+        if ((keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER)
+                && (event.getFlags() & KeyEvent.FLAG_CANCELED_LONG_PRESS) == 0) {
+            xmb.activate();
+            return true;
+        }
+        return super.onKeyUp(keyCode, event);
+    }
+
+    @Override
+    public boolean onKeyLongPress(int keyCode, KeyEvent event) {
+        if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER) {
+            xmb.longActivate();
+            return true;
+        }
+        return super.onKeyLongPress(keyCode, event);
+    }
+
+    // ---------------------------------------------------------------- Background data
+
+    /** Fetch weather, calendar and IPTV in the background when they are stale (or settings changed). */
+    private void refreshData(boolean force) {
+        long now = System.currentTimeMillis();
+        final String city = config.get("weather_city", "");
+        final boolean f = !config.get("weather_units", "f").toLowerCase(Locale.ROOT).startsWith("c");
+        if (!city.isEmpty() && (force || now - weatherAt > WEATHER_EVERY_MS)) {
+            weatherAt = now;
+            io.execute(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        final WeatherClient.Report r = WeatherClient.fetch(city, f);
+                        ui.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                weather = r;
+                                weatherError = null;
+                                reload();
+                            }
+                        });
+                    } catch (final Exception e) {
+                        ui.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                weatherError = e.getMessage();
+                                weatherAt = 0; // try again soon
+                                reload();
+                            }
+                        });
+                    }
+                }
+            });
+        }
+        final List<String> calendars = config.list("calendar_urls");
+        if (!calendars.isEmpty() && (force || now - calendarAt > CALENDAR_EVERY_MS)) {
+            calendarAt = now;
+            io.execute(new Runnable() {
+                @Override
+                public void run() {
+                    long from = System.currentTimeMillis();
+                    Calendar startOfToday = Calendar.getInstance();
+                    startOfToday.set(Calendar.HOUR_OF_DAY, 0);
+                    startOfToday.set(Calendar.MINUTE, 0);
+                    startOfToday.set(Calendar.SECOND, 0);
+                    final List<IcsCalendar.Event> list = IcsCalendar.load(calendars,
+                            startOfToday.getTimeInMillis(), from + CALENDAR_DAYS * 86400000L);
+                    ui.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            events = list;
+                            calendarLoaded = true;
+                            reload();
+                        }
+                    });
+                }
+            });
+        }
+        final List<String> playlists = config.list("iptv_urls");
+        if (!playlists.isEmpty() && (force || now - iptvAt > IPTV_EVERY_MS)) {
+            iptvAt = now;
+            io.execute(new Runnable() {
+                @Override
+                public void run() {
+                    final List<IptvPlaylist.Channel> all = new ArrayList<>();
+                    String err = null;
+                    for (String url : playlists) {
+                        try {
+                            all.addAll(IptvPlaylist.parse(Net.get(url)));
+                        } catch (Exception e) {
+                            err = e.getMessage();
+                        }
+                    }
+                    final String error = all.isEmpty() ? err : null;
+                    ui.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            channels = all;
+                            iptvError = error;
+                            if (all.isEmpty()) iptvAt = 0;
+                            reload();
+                        }
+                    });
+                }
+            });
+        }
+    }
+
+    // ---------------------------------------------------------------- Content
+
+    private void reload() {
+        if (config == null) return;
+        List<XmbView.Cat> cats = new ArrayList<>();
+        List<App> apps = loadApps();
+
+        XmbView.Cat watch = new XmbView.Cat("Watch", XmbView.G_PLAY);
+        XmbView.Cat all = new XmbView.Cat("Apps", XmbView.G_GRID);
+        for (App a : apps) {
+            XmbView.Item item = appItem(a);
+            if (rank(a.pkg) < 1000) watch.items.add(item);
+            all.items.add(item);
+        }
+        cats.add(watch);
+        cats.add(all);
+        cats.add(liveCat());
+        cats.add(calendarCat());
+        cats.add(weatherCat());
+        cats.add(inputsCat());
+        cats.add(settingsCat());
+        xmb.setCategories(cats);
+
+        if (weather != null) {
+            xmb.setWeather(WeatherClient.glyph(weather.code), weather.temp + "°" + (weather.fahrenheit ? "F" : "C"),
+                    WeatherClient.describe(weather.code));
+        } else {
+            xmb.setWeather(-1, "", "");
+        }
+    }
+
+    private XmbView.Item appItem(final App a) {
+        return new XmbView.Item(a.name, null, a.icon, new Runnable() {
+            @Override
+            public void run() {
+                startActivity(new Intent(Intent.ACTION_MAIN)
+                        .addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER)
+                        .setComponent(a.component)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED));
+            }
+        }, new Runnable() {
+            @Override
+            public void run() { // hold OK: app info (uninstall, disable, permissions)
+                startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.fromParts("package", a.pkg, null)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            }
+        });
+    }
+
+    // ---- Live (IPTV)
+
+    private XmbView.Cat liveCat() {
+        XmbView.Cat cat = new XmbView.Cat("Live", XmbView.G_LIVE);
+        Drawable icon = glyph(XmbView.G_LIVE, NEON_MAGENTA);
+        if (config.list("iptv_urls").isEmpty()) {
+            cat.items.add(info("IPTV not set up", "Add iptv_urls to config.properties", icon));
+            return cat;
+        }
+        if (channels.isEmpty()) {
+            cat.items.add(info(iptvError == null ? "Loading channels..." : "Couldn't load channels",
+                    iptvError == null ? "One moment" : iptvError, icon));
+            return cat;
+        }
+        final String lastUrl = prefs.getString("last_channel_url", null);
+        final String lastName = prefs.getString("last_channel_name", null);
+        if (lastUrl != null) {
+            for (int i = 0; i < channels.size(); i++) {
+                if (channels.get(i).url.equals(lastUrl)) {
+                    final int at = i;
+                    cat.items.add(new XmbView.Item("Resume: " + lastName, "Last channel you watched",
+                            glyph(XmbView.G_PLAY, NEON_YELLOW), new Runnable() {
+                        @Override
+                        public void run() {
+                            playChannels(channels, at);
+                        }
+                    }, null));
+                    break;
+                }
+            }
+        }
+        cat.items.add(groupItem("All channels", channels, icon));
+        Map<String, List<IptvPlaylist.Channel>> groups = new LinkedHashMap<>();
+        List<String> names = new ArrayList<>();
+        for (IptvPlaylist.Channel ch : channels) {
+            if (!groups.containsKey(ch.group)) {
+                groups.put(ch.group, new ArrayList<IptvPlaylist.Channel>());
+                names.add(ch.group);
+            }
+            groups.get(ch.group).add(ch);
+        }
+        Collections.sort(names, String.CASE_INSENSITIVE_ORDER);
+        for (String g : names) cat.items.add(groupItem(g, groups.get(g), icon));
+        return cat;
+    }
+
+    private XmbView.Item groupItem(final String title, final List<IptvPlaylist.Channel> list, Drawable icon) {
+        return new XmbView.Item(title, list.size() + " channels", icon, new Runnable() {
+            @Override
+            public void run() {
+                pickChannel(title, list);
+            }
+        }, null);
+    }
+
+    private void pickChannel(String title, final List<IptvPlaylist.Channel> list) {
+        String[] names = new String[list.size()];
+        for (int i = 0; i < names.length; i++) names[i] = list.get(i).name;
+        new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setItems(names, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        playChannels(list, which);
+                    }
+                })
+                .show();
+    }
+
+    private void playChannels(List<IptvPlaylist.Channel> list, int index) {
+        PlayerActivity.channels = list;
+        PlayerActivity.startIndex = index;
+        startActivity(new Intent(this, PlayerActivity.class));
+    }
+
+    // ---- Calendar
+
+    private XmbView.Cat calendarCat() {
+        XmbView.Cat cat = new XmbView.Cat("Calendar", XmbView.G_CAL);
+        Drawable icon = glyph(XmbView.G_CAL, NEON_GREEN);
+        if (config.list("calendar_urls").isEmpty()) {
+            cat.items.add(info("Add your calendar", "Put a public ICS link in calendar_urls", icon));
+            return cat;
+        }
+        if (!calendarLoaded) {
+            cat.items.add(info("Loading calendar...", "One moment", icon));
+            return cat;
+        }
+        long now = System.currentTimeMillis();
+        SimpleDateFormat time = new SimpleDateFormat("h:mm a", Locale.getDefault());
+        SimpleDateFormat day = new SimpleDateFormat("EEE d MMM", Locale.getDefault());
+        int shown = 0;
+        for (final IcsCalendar.Event e : events) {
+            if (e.end < now && !e.allDay) continue; // already finished today
+            if (shown++ >= 40) break;
+            String when = dayLabel(e.start, day);
+            String sub = e.allDay ? when + "  ·  All day"
+                    : when + "  ·  " + time.format(new Date(e.start)) + " - " + time.format(new Date(e.end));
+            if (!e.where.isEmpty()) sub += "  ·  " + e.where;
+            final String detail = e.title + "\n" + sub;
+            cat.items.add(new XmbView.Item(e.title.isEmpty() ? "(No title)" : e.title, sub, icon, new Runnable() {
+                @Override
+                public void run() {
+                    Toast.makeText(LauncherActivity.this, detail, Toast.LENGTH_LONG).show();
+                }
+            }, null));
+        }
+        if (shown == 0) cat.items.add(info("Nothing coming up", "The next " + CALENDAR_DAYS + " days are clear", icon));
+        return cat;
+    }
+
+    private static String dayLabel(long millis, SimpleDateFormat fallback) {
+        Calendar a = Calendar.getInstance();
+        Calendar b = Calendar.getInstance();
+        b.setTimeInMillis(millis);
+        if (a.get(Calendar.YEAR) == b.get(Calendar.YEAR) && a.get(Calendar.DAY_OF_YEAR) == b.get(Calendar.DAY_OF_YEAR)) {
+            return "Today";
+        }
+        a.add(Calendar.DAY_OF_YEAR, 1);
+        if (a.get(Calendar.YEAR) == b.get(Calendar.YEAR) && a.get(Calendar.DAY_OF_YEAR) == b.get(Calendar.DAY_OF_YEAR)) {
+            return "Tomorrow";
+        }
+        return fallback.format(new Date(millis));
+    }
+
+    // ---- Weather
+
+    private XmbView.Cat weatherCat() {
+        XmbView.Cat cat = new XmbView.Cat("Weather", XmbView.G_SUN);
+        Drawable icon = glyph(XmbView.G_SUN, NEON_YELLOW);
+        if (config.get("weather_city", "").isEmpty()) {
+            cat.items.add(info("Add your city", "Set weather_city in config.properties", icon));
+            return cat;
+        }
+        if (weather == null) {
+            cat.items.add(info(weatherError == null ? "Loading weather..." : "Couldn't load weather",
+                    weatherError == null ? "One moment" : weatherError, icon));
+            return cat;
+        }
+        String unit = weather.fahrenheit ? "°F" : "°C";
+        cat.items.add(new XmbView.Item(weather.place + "  " + weather.temp + unit,
+                WeatherClient.describe(weather.code) + "  ·  feels " + weather.feels + "°  ·  wind " + weather.wind
+                        + (weather.fahrenheit ? " mph" : " km/h"),
+                glyph(WeatherClient.glyph(weather.code), NEON_YELLOW), null, null));
+        for (WeatherClient.Day d : weather.days) {
+            cat.items.add(new XmbView.Item(d.label, "High " + d.hi + "°   Low " + d.lo + "°   " + WeatherClient.describe(d.code),
+                    glyph(WeatherClient.glyph(d.code), NEON_CYAN), null, null));
+        }
+        return cat;
+    }
+
+    private static XmbView.Item info(String title, String sub, Drawable icon) {
+        return new XmbView.Item(title, sub, icon, null, null);
+    }
+
+    // ---- Inputs
+
+    private XmbView.Cat inputsCat() {
+        XmbView.Cat cat = new XmbView.Cat("Inputs", XmbView.G_INPUT);
+        final List<TvInputInfo> inputs = connectedInputs();
+
+        TvInputInfo pinned = pinnedInput(inputs);
+        if (pinned != null) {
+            final String id = pinned.getId();
+            cat.items.add(new XmbView.Item("Preview", inputName(pinned) + " in the corner",
+                    glyph(XmbView.G_PLAY, NEON_YELLOW), new Runnable() {
+                @Override
+                public void run() {
+                    togglePreview(id);
+                }
+            }, null));
+        }
+        cat.items.add(new XmbView.Item("Multiview", "Several inputs and web pages at once",
+                glyph(XmbView.G_MULTI, NEON_MAGENTA), new Runnable() {
+            @Override
+            public void run() {
+                startActivity(new Intent(LauncherActivity.this, MultiviewActivity.class));
+            }
+        }, null));
+        for (final TvInputInfo info : inputs) {
+            final String id = info.getId();
+            cat.items.add(new XmbView.Item(inputName(info), stateText(id) + "  ·  hold OK to pin for preview",
+                    glyph(XmbView.G_INPUT, NEON_CYAN), new Runnable() {
+                @Override
+                public void run() {
+                    switchInput(id);
+                }
+            }, new Runnable() {
+                @Override
+                public void run() {
+                    prefs.edit().putString(PREF_CORNER, id).apply();
+                    Toast.makeText(LauncherActivity.this, inputName(info) + " pinned for preview",
+                            Toast.LENGTH_SHORT).show();
+                    reload();
+                }
+            }));
+        }
+        return cat;
+    }
+
+    private XmbView.Cat settingsCat() {
+        XmbView.Cat cat = new XmbView.Cat("Settings", XmbView.G_GEAR);
+        cat.items.add(settingItem("Picture", "Mode, brightness, HDR", XmbView.G_PICTURE, NEON_YELLOW,
+                Settings.ACTION_DISPLAY_SETTINGS));
+        cat.items.add(settingItem("Sound", "Output, equaliser", XmbView.G_SOUND, NEON_GREEN,
+                "android.settings.SOUND_SETTINGS"));
+        cat.items.add(settingItem("Network", "Wi-Fi and internet", XmbView.G_WIFI, NEON_CYAN,
+                Settings.ACTION_WIFI_SETTINGS));
+        cat.items.add(settingItem("All settings", "Everything else", XmbView.G_GEAR, NEON_MAGENTA,
+                Settings.ACTION_SETTINGS));
+        return cat;
+    }
+
+    private XmbView.Item settingItem(String title, String sub, int glyph, int color, final String action) {
+        return new XmbView.Item(title, sub, glyph(glyph, color), new Runnable() {
+            @Override
+            public void run() {
+                startActivity(new Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            }
+        }, null);
+    }
+
+    private static Drawable glyph(int g, int color) {
+        return new XmbView.GlyphDrawable(g, color);
+    }
+
+    // ---------------------------------------------------------------- Inputs helpers
+
+    private List<TvInputInfo> connectedInputs() {
+        List<TvInputInfo> list = new ArrayList<>();
+        if (tvInputs == null) return list;
+        for (TvInputInfo info : tvInputs.getTvInputList()) {
+            if (!info.isPassthroughInput()) continue; // skip tuner / channel based inputs
+            if (tvInputs.getInputState(info.getId()) == TvInputManager.INPUT_STATE_DISCONNECTED) continue;
+            list.add(info);
+        }
+        Collections.sort(list, new Comparator<TvInputInfo>() {
+            @Override
+            public int compare(TvInputInfo a, TvInputInfo b) {
+                return inputName(a).compareToIgnoreCase(inputName(b));
+            }
+        });
+        return list;
+    }
+
+    /** The input chosen for the corner preview; falls back to the Apple TV input. */
+    private TvInputInfo pinnedInput(List<TvInputInfo> inputs) {
+        String id = prefs.getString(PREF_CORNER, null);
+        if (id != null && !id.isEmpty() && tvInputs != null) {
+            TvInputInfo info = tvInputs.getTvInputInfo(id);
+            if (info != null) return info;
+        }
+        if (id != null && id.isEmpty()) return null; // deliberately unpinned
+        for (TvInputInfo info : inputs) {
+            if (inputName(info).equalsIgnoreCase(DEFAULT_CORNER_NAME)) {
+                prefs.edit().putString(PREF_CORNER, info.getId()).apply();
+                return info;
+            }
+        }
+        return null;
+    }
+
+    private String inputName(TvInputInfo info) {
+        if (info.getId().endsWith(MultiviewActivity.APPLE_TV_SUFFIX)) return "Apple TV";
+        CharSequence custom = info.loadCustomLabel(this);
+        CharSequence name = custom != null && custom.length() > 0 ? custom : info.loadLabel(this);
+        return String.valueOf(name);
+    }
+
+    private String stateText(String id) {
+        switch (tvInputs.getInputState(id)) {
+            case TvInputManager.INPUT_STATE_CONNECTED:
+                return "Connected";
+            case TvInputManager.INPUT_STATE_CONNECTED_STANDBY:
+                return "Nothing playing";
+            default:
+                return "No device";
+        }
+    }
+
+    private void switchInput(String inputId) {
+        startActivity(new Intent(Intent.ACTION_VIEW, TvContract.buildChannelUriForPassthroughInput(inputId))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+    }
+
+    /** A small floating live picture of an input, kept above other apps. */
+    private void togglePreview(String inputId) {
+        if (OverlayPreview.isShowing()) {
+            OverlayPreview.hide();
+        } else if (OverlayPreview.canUse(this)) {
+            float d = getResources().getDisplayMetrics().density;
+            OverlayPreview.show(this, inputId, Math.round(40 * d), Math.round(34 * d));
+        } else {
+            Toast.makeText(this, "Allow \"display over other apps\" for Home to use the preview",
+                    Toast.LENGTH_LONG).show();
+        }
+    }
+
+    // ---------------------------------------------------------------- Apps
+
+    private static class App {
+        final String pkg;
+        final String name;
+        final ComponentName component;
+        final Drawable icon;
+
+        App(String pkg, String name, ComponentName component, Drawable icon) {
+            this.pkg = pkg;
+            this.name = name;
+            this.component = component;
+            this.icon = icon;
+        }
+    }
+
+    private List<App> loadApps() {
+        PackageManager pm = getPackageManager();
+        Intent query = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER);
+        List<App> apps = new ArrayList<>();
+        List<String> seen = new ArrayList<>();
+        for (ResolveInfo ri : pm.queryIntentActivities(query, 0)) {
+            String pkg = ri.activityInfo.packageName;
+            if (pkg.equals(getPackageName()) || seen.contains(pkg) || isHidden(pkg)) continue;
+            seen.add(pkg);
+            apps.add(new App(pkg, String.valueOf(ri.loadLabel(pm)),
+                    new ComponentName(pkg, ri.activityInfo.name), ri.loadIcon(pm)));
+        }
+        Collections.sort(apps, new Comparator<App>() {
+            @Override
+            public int compare(App a, App b) {
+                int ra = rank(a.pkg);
+                int rb = rank(b.pkg);
+                if (ra != rb) return ra - rb;
+                return a.name.compareToIgnoreCase(b.name);
+            }
+        });
+        return apps;
+    }
+
+    private static boolean isHidden(String pkg) {
+        if (!pkg.startsWith(HIDDEN_PREFIX)) return false;
+        for (String ok : ALLOWED_VT) if (ok.equals(pkg)) return false;
+        return true;
+    }
+
+    private static int rank(String pkg) {
+        if (pkg.equals(SETTINGS)) return 10000;
+        for (int i = 0; i < PINNED.length; i++) if (PINNED[i].equals(pkg)) return i;
+        return 1000;
+    }
+}
